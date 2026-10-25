@@ -9,3 +9,10 @@ license = "MIT"
 flate2 = "1"
 sha2 = "0.10"
 uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "maze"
+harness = false

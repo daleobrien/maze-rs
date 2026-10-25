@@ -100,6 +100,10 @@ pub fn create_maze(width: usize, height: usize, density: i64, add_a_loop: bool, 
 
     rng.shuffle(&mut edges);
 
+    // each cell has at most one N and one W edge
+    let edge_index = |x: usize, y: usize, d: u8| (y * width + x) * 2 + usize::from(d == W);
+    let mut removed = vec![false; width * height * 2];
+
     // build the over/under locations
     for cy in 1..height.saturating_sub(1) {
         for cx in 1..width.saturating_sub(1) {
@@ -130,11 +134,16 @@ pub fn create_maze(width: usize, height: usize, density: i64, add_a_loop: bool, 
             grid[ey][ex] |= W;
             grid[sy][sx] |= N;
 
-            edges.retain(|&(x, y, d)| {
-                !((x == cx && y == cy) || (x == ex && y == ey && d == W) || (x == sx && y == sy && d == N))
-            });
+            // the edges into the crossing are no longer available; they are
+            // dropped in one pass below, which keeps the order of the rest
+            removed[edge_index(cx, cy, N)] = true;
+            removed[edge_index(cx, cy, W)] = true;
+            removed[edge_index(ex, ey, W)] = true;
+            removed[edge_index(sx, sy, N)] = true;
         }
     }
+
+    edges.retain(|&(x, y, d)| !removed[edge_index(x, y, d)]);
 
     // Kruskal's algorithm
     while let Some((x, y, direction)) = edges.pop() {
@@ -184,9 +193,23 @@ fn is_crossing(cell: u8) -> bool {
     cell == CROSS_NS || cell == CROSS_EW
 }
 
+/// Up to four moves out of a cell, in the order they are tried.
+#[derive(Default)]
+struct Moves {
+    moves: [(isize, isize); 4],
+    len: usize,
+}
+
+impl Moves {
+    fn push(&mut self, mv: (isize, isize)) {
+        self.moves[self.len] = mv;
+        self.len += 1;
+    }
+}
+
 /// For a given position, return all the possible coordinate moves.
-fn get_moves(grid: &Grid, coordinate: (isize, isize), cell: u8) -> Vec<(isize, isize)> {
-    let mut moves = Vec::new();
+fn get_moves(grid: &Grid, coordinate: (isize, isize), cell: u8) -> Moves {
+    let mut moves = Moves::default();
     let (x, y) = coordinate;
     let row = &grid[y as usize];
     let col = |yy: isize| py_index(&grid[..], yy)[x as usize];
@@ -239,17 +262,17 @@ pub fn find_solution(grid: &Grid) -> Option<Vec<(isize, isize)>> {
     on_path[0][0] = true;
 
     // one frame per element of `path`: the moves out of it and how many have been tried
-    let mut frames: Vec<(Vec<(isize, isize)>, usize)> = vec![(get_moves(grid, (0, 0), grid[0][0]), 0)];
+    let mut frames: Vec<(Moves, usize)> = vec![(get_moves(grid, (0, 0), grid[0][0]), 0)];
 
     while let Some((moves, next)) = frames.last_mut() {
         let coordinate = *path.last().unwrap();
-        if *next >= moves.len() {
+        if *next >= moves.len {
             frames.pop();
             let (x, y) = path.pop().unwrap();
             on_path[y as usize][x as usize] = false;
             continue;
         }
-        let mv = moves[*next];
+        let mv = moves.moves[*next];
         *next += 1;
 
         let new_coordinate = (coordinate.0 + mv.0, coordinate.1 + mv.1);

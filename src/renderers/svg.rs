@@ -1,24 +1,33 @@
 use std::f64::consts::PI;
+use std::fmt::Write as _;
 
 use crate::maze::{Grid, CROSS_EW, CROSS_NS};
-use crate::renderers::{page_size, py_float_repr, PageSize};
+use crate::renderers::{page_size, push_fixed, py_float_repr, PageSize};
 
 const QUARTER: f64 = PI / 2.0;
 const HALF: f64 = PI;
 const THREE_QUARTER: f64 = 3.0 * PI / 2.0;
 const FULL: f64 = 2.0 * PI;
 
-/// Round to two decimals and strip trailing zeros after the decimal point.
-fn round(x: f64) -> String {
-    let mut s = format!("{x:.2}");
-    if s.contains('.') {
-        while s.ends_with('0') {
-            s.pop();
+/// Round to two decimals and strip trailing zeros after the decimal point,
+/// appending the result to `out`.
+fn push_round(out: &mut String, x: f64) {
+    let start = out.len();
+    push_fixed(out, x, 2);
+    if out[start..].contains('.') {
+        while out.ends_with('0') {
+            out.pop();
         }
-        if s.ends_with('.') {
-            s.pop();
+        if out.ends_with('.') {
+            out.pop();
         }
     }
+}
+
+/// Round to two decimals and strip trailing zeros after the decimal point.
+fn round(x: f64) -> String {
+    let mut s = String::new();
+    push_round(&mut s, x);
     s
 }
 
@@ -100,11 +109,14 @@ impl SvgPath {
         }
     }
 
-    fn path(&self) -> String {
-        format!(
+    /// Append the `<path>` element (and any dots) to `out`.
+    fn write_path(&self, out: &mut String) {
+        write!(
+            out,
             r#"<path stroke-opacity="{}" stroke-width="{}" stroke="{}" d="{}" /> {}"#,
             self.opacity, self.stroke_width, self.colour, self.svg, self.dots
         )
+        .unwrap();
     }
 
     fn dot(&mut self, x: f64, y: f64) {
@@ -138,25 +150,39 @@ impl SvgPath {
         let diff = e - s;
         let large = if 0.0 < diff && diff <= PI { 1 - dir } else { dir };
 
-        self.svg += &format!(
-            "L{} {} A {} {} 0 {} {} {} {} ",
-            round(a),
-            round(b),
-            round(radius),
-            round(radius),
-            large,
-            dir,
-            round(c),
-            round(d)
-        );
+        let out = &mut self.svg;
+        out.push('L');
+        push_round(out, a);
+        out.push(' ');
+        push_round(out, b);
+        out.push_str(" A ");
+        let r_start = out.len();
+        push_round(out, radius);
+        let r_end = out.len();
+        out.push(' ');
+        out.extend_from_within(r_start..r_end);
+        write!(out, " 0 {large} {dir} ").unwrap();
+        push_round(out, c);
+        out.push(' ');
+        push_round(out, d);
+        out.push(' ');
+    }
+
+    /// Append a command and its point, e.g. `M 1.5 2 `.
+    fn command(&mut self, name: &str, x: f64, y: f64) {
+        self.svg.push_str(name);
+        push_round(&mut self.svg, x);
+        self.svg.push(' ');
+        push_round(&mut self.svg, y);
+        self.svg.push(' ');
     }
 
     fn m(&mut self, x: f64, y: f64) {
-        self.svg += &format!("M {} {} ", round(x), round(y));
+        self.command("M ", x, y);
     }
 
     fn l(&mut self, x: f64, y: f64) {
-        self.svg += &format!("L {} {} ", round(x), round(y));
+        self.command("L ", x, y);
     }
 
     fn ml(&mut self, a: f64, b: f64, c: f64, d: f64) {
@@ -736,9 +762,16 @@ pub fn svg_render(grid: &Grid, width: usize, height: usize, page: PageSize, draw
 
     // the Python version always appends an (empty) set of extra dots
     let dots = "";
+    let mut paths = vec![&walls];
     if solution.is_some() {
-        format!("{head} {} {} {} {dots} </svg>", walls.path(), over_trace.path(), under_trace.path())
-    } else {
-        format!("{head} {} {dots} </svg>", walls.path())
+        paths.extend([&over_trace, &under_trace]);
     }
+    let mut out = String::with_capacity(head.len() + paths.iter().map(|p| p.svg.len() + p.dots.len() + 100).sum::<usize>());
+    out.push_str(&head);
+    for p in paths {
+        out.push(' ');
+        p.write_path(&mut out);
+    }
+    write!(out, " {dots} </svg>").unwrap();
+    out
 }

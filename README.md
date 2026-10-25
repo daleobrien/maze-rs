@@ -21,8 +21,14 @@ How parity is kept:
   `randint` and `shuffle`, so the same maze id yields the same maze.
 - `src/renderers/pdf.rs` writes the PDF directly (no ReportLab), copying
   ReportLab's number formatting, transform merging and Bezier arcs.
-- `tests/python_parity.rs` checks the output against fixtures generated
-  by the Python version.
+- `tests/snapshot.rs` pins hashes of the text, SVG and PDF output for a
+  set of maze ids, so changes can't silently alter what is generated.
+
+Benchmarks for generation, solving and each renderer:
+
+```bash
+cargo bench
+```
 
 Differences from the Python version:
 

@@ -10,20 +10,22 @@ use flate2::write::ZlibEncoder;
 use flate2::Compression;
 
 use crate::maze::Grid;
-use crate::renderers::{page_size, PageSize};
+use crate::renderers::{page_size, push_fixed, PageSize};
 
-/// ReportLab's `fp_str` for a single number.
-fn fp_num(x: f64) -> String {
+/// ReportLab's `fp_str` for a single number, appended to `out`.
+fn push_fp_num(out: &mut String, x: f64) {
     let sa = x.abs();
     if sa <= 1e-7 {
-        return "0".to_string();
+        out.push('0');
+        return;
     }
     let l = if sa <= 1.0 { 6 } else { (6 - sa.log10() as i64).clamp(0, 6) as usize };
-    let mut n = format!("{x:.l$}");
+    let start = out.len();
+    push_fixed(out, x, l);
     if l > 0 {
-        let bytes = n.as_bytes();
+        let bytes = out.as_bytes();
         let mut j = bytes.len();
-        while j > 0 {
+        while j > start {
             j -= 1;
             if bytes[j] != b'0' {
                 if bytes[j] != b'.' {
@@ -32,17 +34,28 @@ fn fp_num(x: f64) -> String {
                 break;
             }
         }
-        n.truncate(j);
+        out.truncate(j);
     }
-    if n.starts_with('0') && n.len() > 1 {
-        n.remove(0);
+    if out.as_bytes()[start] == b'0' && out.len() - start > 1 {
+        out.remove(start);
     }
-    n
+}
+
+/// ReportLab's `fp_str` for several numbers, appended to `out`.
+fn push_fp_str(out: &mut String, xs: &[f64]) {
+    for (i, &x) in xs.iter().enumerate() {
+        if i > 0 {
+            out.push(' ');
+        }
+        push_fp_num(out, x);
+    }
 }
 
 /// ReportLab's `fp_str` for several numbers.
 fn fp_str(xs: &[f64]) -> String {
-    xs.iter().map(|&x| fp_num(x)).collect::<Vec<_>>().join(" ")
+    let mut out = String::new();
+    push_fp_str(&mut out, xs);
+    out
 }
 
 /// ReportLab's `pdfgeom.bezierArc`.
@@ -97,20 +110,28 @@ fn bezier_arc(x1: f64, y1: f64, x2: f64, y2: f64, start_ang: f64, extent: f64) -
 
 /// Equivalent of ReportLab's `PDFPathObject`.
 struct Path {
-    code: Vec<String>,
+    code: String,
 }
 
 impl Path {
     fn new() -> Self {
-        Path { code: vec!["n".to_string()] }
+        Path { code: "n".to_string() }
+    }
+
+    /// Append one operator: its operands, then its name.
+    fn op(&mut self, operands: &[f64], name: &str) {
+        self.code.push(' ');
+        push_fp_str(&mut self.code, operands);
+        self.code.push(' ');
+        self.code.push_str(name);
     }
 
     fn move_to(&mut self, x: f64, y: f64) {
-        self.code.push(format!("{} m", fp_str(&[x, y])));
+        self.op(&[x, y], "m");
     }
 
     fn line_to(&mut self, x: f64, y: f64) {
-        self.code.push(format!("{} l", fp_str(&[x, y])));
+        self.op(&[x, y], "l");
     }
 
     fn curves(&mut self, curves: &[[f64; 8]], initial_line: bool) {
@@ -121,7 +142,7 @@ impl Path {
             self.move_to(x, y);
         }
         for c in curves {
-            self.code.push(format!("{} c", fp_str(&c[2..])));
+            self.op(&c[2..], "c");
         }
     }
 
@@ -135,54 +156,85 @@ impl Path {
         let width = 2.0 * r;
         self.curves(&bezier_arc(x1, y1, x1 + width, y1 + width, 0.0, 360.0), false);
     }
-
-    fn code(&self) -> String {
-        self.code.join(" ")
-    }
 }
 
 /// The subset of ReportLab's `Canvas` drawing state the maze needs.
+///
+/// Operators are written straight into one buffer, one per line.
 struct Canvas {
-    code: Vec<String>,
+    code: String,
+    /// Where the last operator starts, if it is a `cm` transform.
+    last_cm: Option<usize>,
 }
 
 impl Canvas {
+    fn new(preamble: &str) -> Self {
+        Canvas { code: preamble.to_string(), last_cm: None }
+    }
+
+    /// Start a new operator line.
+    fn begin_op(&mut self) {
+        self.code.push('\n');
+        self.last_cm = None;
+    }
+
+    fn push_op(&mut self, op: &str) {
+        self.begin_op();
+        self.code.push_str(op);
+    }
+
+    fn push_cm(&mut self, values: &[f64; 6]) {
+        self.begin_op();
+        self.last_cm = Some(self.code.len());
+        push_fp_str(&mut self.code, values);
+        self.code.push_str(" cm");
+    }
+
     fn translate(&mut self, dx: f64, dy: f64) {
         // ReportLab folds consecutive transforms into one `cm` operator,
         // re-reading the previous (already formatted) values.
-        if let Some(last) = self.code.last_mut() {
-            if last.ends_with(" cm") {
-                let v: Vec<f64> = last.split_whitespace().take(6).map(|t| t.parse().unwrap()).collect();
-                let (a0, b0, c0, d0, e0, f0) = (v[0], v[1], v[2], v[3], v[4], v[5]);
-                let (a, b, c, d) = (1.0, 0.0, 0.0, 1.0);
-                *last = format!(
-                    "{} cm",
-                    fp_str(&[
-                        a0 * a + c0 * b,
-                        b0 * a + d0 * b,
-                        a0 * c + c0 * d,
-                        b0 * c + d0 * d,
-                        a0 * dx + c0 * dy + e0,
-                        b0 * dx + d0 * dy + f0,
-                    ])
-                );
-                return;
+        if let Some(start) = self.last_cm {
+            let mut v = [0.0; 6];
+            for (slot, t) in v.iter_mut().zip(self.code[start..].split_whitespace()) {
+                *slot = t.parse().unwrap();
             }
+            let [a0, b0, c0, d0, e0, f0] = v;
+            let (a, b, c, d) = (1.0, 0.0, 0.0, 1.0);
+            // drop the old operator and its line break; push_cm adds them back
+            self.code.truncate(start - 1);
+            self.push_cm(&[
+                a0 * a + c0 * b,
+                b0 * a + d0 * b,
+                a0 * c + c0 * d,
+                b0 * c + d0 * d,
+                a0 * dx + c0 * dy + e0,
+                b0 * dx + d0 * dy + f0,
+            ]);
+            return;
         }
-        self.code.push(format!("{} cm", fp_str(&[1.0, 0.0, 0.0, 1.0, dx, dy])));
+        self.push_cm(&[1.0, 0.0, 0.0, 1.0, dx, dy]);
     }
 
     fn set_stroke_rgb(&mut self, r: f64, g: f64, b: f64) {
-        self.code.push(format!("{} RG", fp_str(&[r, g, b])));
+        self.begin_op();
+        push_fp_str(&mut self.code, &[r, g, b]);
+        self.code.push_str(" RG");
     }
 
     fn set_fill_rgb(&mut self, r: f64, g: f64, b: f64) {
-        self.code.push(format!("{} rg", fp_str(&[r, g, b])));
+        self.begin_op();
+        push_fp_str(&mut self.code, &[r, g, b]);
+        self.code.push_str(" rg");
+    }
+
+    /// Draw a path, given its already built operators.
+    fn draw_path_code(&mut self, code: &str, fill: bool) {
+        self.push_op(code);
+        self.push_op(if fill { "B*" } else { "S" });
     }
 
     fn draw_path(&mut self, p: &Path, fill: bool) {
-        self.code.push(p.code());
-        self.code.push(if fill { "B*" } else { "S" }.to_string());
+        self.draw_path_code(&p.code, fill);
     }
 }
 
@@ -202,10 +254,10 @@ pub fn pdf_content(grid: &Grid, options: &PdfOptions) -> (String, f64, f64) {
         std::mem::swap(&mut page_width, &mut page_height);
     }
 
-    let mut c = Canvas { code: Vec::new() };
+    let mut c = Canvas::new("1 0 0 1 0 0 cm  BT /F1 12 Tf 14.4 TL ET");
 
     // 0=butt,1=round,2=square
-    c.code.push("1 J".to_string());
+    c.push_op("1 J");
 
     let mut left_margin = 15.0;
     let mut top_margin = 15.0;
@@ -228,7 +280,7 @@ pub fn pdf_content(grid: &Grid, options: &PdfOptions) -> (String, f64, f64) {
 
     let g = s * 0.2;
     let stroke = s / 7.0;
-    c.code.push(format!("{} w", fp_str(&[stroke])));
+    c.push_op(&format!("{} w", fp_str(&[stroke])));
 
     let k = 0.5;
 
@@ -282,6 +334,250 @@ pub fn pdf_content(grid: &Grid, options: &PdfOptions) -> (String, f64, f64) {
         p.line_to(b, s);
     };
 
+    // the walls of one tile, in the tile's own coordinates
+    let tile_path = |cell: u8, start: bool, end: bool| {
+        let mut p = Path::new();
+        match cell {
+            3 => {
+                // │ │
+                // │ │
+                p.move_to(a, s);
+                p.line_to(a, 0.0);
+                p.move_to(b, s);
+                p.line_to(b, 0.0);
+            }
+            1 => {
+                // │ │
+                // └─┘
+                p.move_to(b, 0.0);
+                if draw_with_curves {
+                    p.line_to(b, q);
+                    let x = s - v - r;
+                    let y = n;
+                    p.arc_to(x, y, x + 2.0 * r, y + 2.0 * r, 180.0, delta);
+
+                    p.arc_to(g / 2.0, g / 2.0, s - g / 2.0, s - g / 2.0, theta - 90.0, 360.0 - 2.0 * theta);
+
+                    let x = v - r;
+                    p.arc_to(x, y, x + 2.0 * r, y + 2.0 * r, 90.0 - theta, delta);
+                } else {
+                    p.line_to(b, b);
+                    p.line_to(a, b);
+                }
+                p.line_to(g, 0.0);
+            }
+            2 => {
+                // ┌─┐
+                // │ │
+                p.move_to(b, s);
+                if draw_with_curves {
+                    let x = s - v - r;
+                    let y = s - n - 2.0 * r;
+                    p.arc_to(x, y, x + 2.0 * r, y + 2.0 * r, 180.0, -delta);
+
+                    p.arc_to(g / 2.0, g / 2.0, s - g / 2.0, s - g / 2.0, 90.0 - theta, -360.0 + 2.0 * theta);
+
+                    let x = v - r;
+                    p.arc_to(x, y, x + 2.0 * r, y + 2.0 * r, 270.0 + theta, -delta);
+                } else {
+                    p.line_to(b, a);
+                    p.line_to(a, a);
+                }
+                p.line_to(a, s);
+            }
+            4 => {
+                // ┌──
+                // └──
+                p.move_to(s, b);
+                if draw_with_curves {
+                    let x = s - n - 2.0 * r;
+                    let y = s - v - r;
+                    p.arc_to(x, y, x + 2.0 * r, y + 2.0 * r, 270.0, delta);
+
+                    p.arc_to(g / 2.0, g / 2.0, s - g / 2.0, s - g / 2.0, 90.0 + delta, 360.0 - 2.0 * theta);
+
+                    let y = v - r;
+                    p.arc_to(x, y, x + 2.0 * r, y + 2.0 * r, 180.0 - theta, delta);
+                } else {
+                    p.line_to(g, b);
+                    p.line_to(a, a);
+                }
+                p.line_to(s, a);
+            }
+            8 => {
+                // ──┐
+                // ──┘
+                p.move_to(0.0, b);
+                if draw_with_curves {
+                    let x = n;
+                    let y = s - v - r;
+
+                    p.arc_to(x, y, x + 2.0 * r, y + 2.0 * r, 270.0, -delta);
+
+                    p.arc_to(g / 2.0, g / 2.0, s - g / 2.0, s - g / 2.0, 90.0 - delta, -360.0 + 2.0 * theta);
+
+                    let y = v - r;
+                    p.arc_to(x, y, x + 2.0 * r, y + 2.0 * r, theta, -delta);
+                } else {
+                    p.line_to(b, b);
+                    p.line_to(b, a);
+                }
+                p.line_to(0.0, a);
+            }
+            5 => {
+                // │ └
+                // └──
+                s_shape_10(&mut p);
+
+                p.move_to(s, b);
+                if draw_with_curves {
+                    if start {
+                        p.arc_to(a, a, b, b, 90.0, 90.0);
+                    } else {
+                        p.arc_to(a, 2.0 * a - b, 2.0 * b - a, b, 90.0, 90.0);
+                    }
+                } else {
+                    p.line_to(a, b);
+                }
+                p.line_to(a, 0.0);
+            }
+            6 => {
+                // ┌──
+                // │ ┌
+                s_shape_11(&mut p);
+
+                p.move_to(s, a);
+                if draw_with_curves {
+                    p.arc_to(a, a, 2.0 * b + a, 2.0 * b + a, 270.0, -90.0);
+                } else {
+                    p.line_to(a, a);
+                }
+                p.line_to(a, s);
+            }
+            7 => {
+                // │ └
+                // │ ┌
+                p.move_to(a, s);
+                p.line_to(a, 0.0);
+
+                s_shape_10(&mut p);
+                s_shape_11(&mut p);
+            }
+            9 => {
+                // ┘ │
+                // ──┘
+                s_shape_00(&mut p);
+
+                p.move_to(b, 0.0);
+                if draw_with_curves {
+                    p.arc_to(2.0 * a - b, 2.0 * a - b, b, b, 0.0, 90.0);
+                } else {
+                    p.line_to(b, b);
+                }
+                p.line_to(0.0, b);
+            }
+            10 => {
+                // ──┐
+                // ┐ │
+                s_shape_01(&mut p);
+
+                p.move_to(0.0, a);
+                if draw_with_curves {
+                    if end {
+                        p.arc_to(a, a, b, b, 270.0, 90.0);
+                    } else {
+                        p.arc_to(2.0 * a - b, a, b, 2.0 * b + a, 270.0, 90.0);
+                    }
+                } else {
+                    p.line_to(b, a);
+                }
+                p.line_to(b, s);
+            }
+            11 => {
+                // ┘ │
+                // ┐ │
+                p.move_to(b, s);
+                p.line_to(b, 0.0);
+
+                s_shape_00(&mut p);
+                s_shape_01(&mut p);
+            }
+            12 => {
+                // ───
+                // ───
+                p.move_to(0.0, b);
+                p.line_to(s, b);
+                p.move_to(0.0, a);
+                p.line_to(s, a);
+            }
+            13 => {
+                // ┘ └
+                // ───
+                p.move_to(0.0, b);
+                p.line_to(s, b);
+
+                s_shape_00(&mut p);
+                s_shape_10(&mut p);
+            }
+            14 => {
+                // ───
+                // ┐ ┌
+                p.move_to(0.0, a);
+                p.line_to(s, a);
+
+                s_shape_01(&mut p);
+                s_shape_11(&mut p);
+            }
+            15 => {
+                // ┘ └
+                // ┐ ┌
+                s_shape_00(&mut p);
+                s_shape_10(&mut p);
+                s_shape_01(&mut p);
+                s_shape_11(&mut p);
+            }
+            19 => {
+                // ┤ ├
+                // ┤ ├
+                p.move_to(a, s);
+                p.line_to(a, 0.0);
+                p.move_to(b, s);
+                p.line_to(b, 0.0);
+
+                p.move_to(0.0, a);
+                p.line_to(a, a);
+                p.move_to(0.0, b);
+                p.line_to(a, b);
+
+                p.move_to(s, a);
+                p.line_to(b, a);
+                p.move_to(s, b);
+                p.line_to(b, b);
+            }
+            28 => {
+                // ┴─┴
+                // ┬─┬
+                p.move_to(0.0, b);
+                p.line_to(s, b);
+                p.move_to(0.0, a);
+                p.line_to(s, a);
+
+                p.move_to(a, a);
+                p.line_to(a, 0.0);
+                p.move_to(a, b);
+                p.line_to(a, s);
+
+                p.move_to(b, a);
+                p.line_to(b, 0.0);
+                p.move_to(b, b);
+                p.line_to(b, s);
+            }
+            _ => {}
+        }
+        p
+    };
+    let mut tile_cache: [Option<String>; 32] = Default::default();
+
     for (j, row) in grid.iter().enumerate() {
         // upper/lower rows
         for (i, &cell) in row.iter().enumerate() {
@@ -290,7 +586,6 @@ pub fn pdf_content(grid: &Grid, options: &PdfOptions) -> (String, f64, f64) {
 
             c.translate(x_offset, y_offset);
             c.set_stroke_rgb(0.0, 0.0, 0.0);
-            let mut p = Path::new();
 
             // mark start and end
             let start = i == 0 && j == height - 1;
@@ -299,257 +594,23 @@ pub fn pdf_content(grid: &Grid, options: &PdfOptions) -> (String, f64, f64) {
             if start || end {
                 c.set_stroke_rgb(0.9, 0.1, 0.1);
                 c.set_fill_rgb(0.9, 0.1, 0.1);
+                let mut p = Path::new();
                 p.circle(s / 2.0, s / 2.0, g / 1.5);
                 c.draw_path(&p, true);
 
-                p = Path::new();
+                c.draw_path(&tile_path(cell, start, end), false);
+            } else {
+                // a tile is drawn relative to its own cell, so every cell of
+                // the same kind has the same path
+                let code = tile_cache[usize::from(cell)].get_or_insert_with(|| tile_path(cell, false, false).code);
+                c.draw_path_code(code, false);
             }
-
-            match cell {
-                3 => {
-                    // │ │
-                    // │ │
-                    p.move_to(a, s);
-                    p.line_to(a, 0.0);
-                    p.move_to(b, s);
-                    p.line_to(b, 0.0);
-                }
-                1 => {
-                    // │ │
-                    // └─┘
-                    p.move_to(b, 0.0);
-                    if draw_with_curves {
-                        p.line_to(b, q);
-                        let x = s - v - r;
-                        let y = n;
-                        p.arc_to(x, y, x + 2.0 * r, y + 2.0 * r, 180.0, delta);
-
-                        p.arc_to(g / 2.0, g / 2.0, s - g / 2.0, s - g / 2.0, theta - 90.0, 360.0 - 2.0 * theta);
-
-                        let x = v - r;
-                        p.arc_to(x, y, x + 2.0 * r, y + 2.0 * r, 90.0 - theta, delta);
-                    } else {
-                        p.line_to(b, b);
-                        p.line_to(a, b);
-                    }
-                    p.line_to(g, 0.0);
-                }
-                2 => {
-                    // ┌─┐
-                    // │ │
-                    p.move_to(b, s);
-                    if draw_with_curves {
-                        let x = s - v - r;
-                        let y = s - n - 2.0 * r;
-                        p.arc_to(x, y, x + 2.0 * r, y + 2.0 * r, 180.0, -delta);
-
-                        p.arc_to(g / 2.0, g / 2.0, s - g / 2.0, s - g / 2.0, 90.0 - theta, -360.0 + 2.0 * theta);
-
-                        let x = v - r;
-                        p.arc_to(x, y, x + 2.0 * r, y + 2.0 * r, 270.0 + theta, -delta);
-                    } else {
-                        p.line_to(b, a);
-                        p.line_to(a, a);
-                    }
-                    p.line_to(a, s);
-                }
-                4 => {
-                    // ┌──
-                    // └──
-                    p.move_to(s, b);
-                    if draw_with_curves {
-                        let x = s - n - 2.0 * r;
-                        let y = s - v - r;
-                        p.arc_to(x, y, x + 2.0 * r, y + 2.0 * r, 270.0, delta);
-
-                        p.arc_to(g / 2.0, g / 2.0, s - g / 2.0, s - g / 2.0, 90.0 + delta, 360.0 - 2.0 * theta);
-
-                        let y = v - r;
-                        p.arc_to(x, y, x + 2.0 * r, y + 2.0 * r, 180.0 - theta, delta);
-                    } else {
-                        p.line_to(g, b);
-                        p.line_to(a, a);
-                    }
-                    p.line_to(s, a);
-                }
-                8 => {
-                    // ──┐
-                    // ──┘
-                    p.move_to(0.0, b);
-                    if draw_with_curves {
-                        let x = n;
-                        let y = s - v - r;
-
-                        p.arc_to(x, y, x + 2.0 * r, y + 2.0 * r, 270.0, -delta);
-
-                        p.arc_to(g / 2.0, g / 2.0, s - g / 2.0, s - g / 2.0, 90.0 - delta, -360.0 + 2.0 * theta);
-
-                        let y = v - r;
-                        p.arc_to(x, y, x + 2.0 * r, y + 2.0 * r, theta, -delta);
-                    } else {
-                        p.line_to(b, b);
-                        p.line_to(b, a);
-                    }
-                    p.line_to(0.0, a);
-                }
-                5 => {
-                    // │ └
-                    // └──
-                    s_shape_10(&mut p);
-
-                    p.move_to(s, b);
-                    if draw_with_curves {
-                        if start {
-                            p.arc_to(a, a, b, b, 90.0, 90.0);
-                        } else {
-                            p.arc_to(a, 2.0 * a - b, 2.0 * b - a, b, 90.0, 90.0);
-                        }
-                    } else {
-                        p.line_to(a, b);
-                    }
-                    p.line_to(a, 0.0);
-                }
-                6 => {
-                    // ┌──
-                    // │ ┌
-                    s_shape_11(&mut p);
-
-                    p.move_to(s, a);
-                    if draw_with_curves {
-                        p.arc_to(a, a, 2.0 * b + a, 2.0 * b + a, 270.0, -90.0);
-                    } else {
-                        p.line_to(a, a);
-                    }
-                    p.line_to(a, s);
-                }
-                7 => {
-                    // │ └
-                    // │ ┌
-                    p.move_to(a, s);
-                    p.line_to(a, 0.0);
-
-                    s_shape_10(&mut p);
-                    s_shape_11(&mut p);
-                }
-                9 => {
-                    // ┘ │
-                    // ──┘
-                    s_shape_00(&mut p);
-
-                    p.move_to(b, 0.0);
-                    if draw_with_curves {
-                        p.arc_to(2.0 * a - b, 2.0 * a - b, b, b, 0.0, 90.0);
-                    } else {
-                        p.line_to(b, b);
-                    }
-                    p.line_to(0.0, b);
-                }
-                10 => {
-                    // ──┐
-                    // ┐ │
-                    s_shape_01(&mut p);
-
-                    p.move_to(0.0, a);
-                    if draw_with_curves {
-                        if end {
-                            p.arc_to(a, a, b, b, 270.0, 90.0);
-                        } else {
-                            p.arc_to(2.0 * a - b, a, b, 2.0 * b + a, 270.0, 90.0);
-                        }
-                    } else {
-                        p.line_to(b, a);
-                    }
-                    p.line_to(b, s);
-                }
-                11 => {
-                    // ┘ │
-                    // ┐ │
-                    p.move_to(b, s);
-                    p.line_to(b, 0.0);
-
-                    s_shape_00(&mut p);
-                    s_shape_01(&mut p);
-                }
-                12 => {
-                    // ───
-                    // ───
-                    p.move_to(0.0, b);
-                    p.line_to(s, b);
-                    p.move_to(0.0, a);
-                    p.line_to(s, a);
-                }
-                13 => {
-                    // ┘ └
-                    // ───
-                    p.move_to(0.0, b);
-                    p.line_to(s, b);
-
-                    s_shape_00(&mut p);
-                    s_shape_10(&mut p);
-                }
-                14 => {
-                    // ───
-                    // ┐ ┌
-                    p.move_to(0.0, a);
-                    p.line_to(s, a);
-
-                    s_shape_01(&mut p);
-                    s_shape_11(&mut p);
-                }
-                15 => {
-                    // ┘ └
-                    // ┐ ┌
-                    s_shape_00(&mut p);
-                    s_shape_10(&mut p);
-                    s_shape_01(&mut p);
-                    s_shape_11(&mut p);
-                }
-                19 => {
-                    // ┤ ├
-                    // ┤ ├
-                    p.move_to(a, s);
-                    p.line_to(a, 0.0);
-                    p.move_to(b, s);
-                    p.line_to(b, 0.0);
-
-                    p.move_to(0.0, a);
-                    p.line_to(a, a);
-                    p.move_to(0.0, b);
-                    p.line_to(a, b);
-
-                    p.move_to(s, a);
-                    p.line_to(b, a);
-                    p.move_to(s, b);
-                    p.line_to(b, b);
-                }
-                28 => {
-                    // ┴─┴
-                    // ┬─┬
-                    p.move_to(0.0, b);
-                    p.line_to(s, b);
-                    p.move_to(0.0, a);
-                    p.line_to(s, a);
-
-                    p.move_to(a, a);
-                    p.line_to(a, 0.0);
-                    p.move_to(a, b);
-                    p.line_to(a, s);
-
-                    p.move_to(b, a);
-                    p.line_to(b, 0.0);
-                    p.move_to(b, b);
-                    p.line_to(b, s);
-                }
-                _ => {}
-            }
-
-            c.draw_path(&p, false);
             c.translate(-x_offset, -y_offset);
         }
     }
 
-    let preamble = "1 0 0 1 0 0 cm  BT /F1 12 Tf 14.4 TL ET";
-    let content = format!("{preamble}\n{}\n \n", c.code.join("\n"));
+    let mut content = c.code;
+    content.push_str("\n \n");
     (content, page_width, page_height)
 }
 
