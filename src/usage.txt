@@ -1,0 +1,44 @@
+
+
+Maze.
+
+An implementation of a "weave" maze generator. Weave mazes are those
+with passages that pass both over and under other passages. The
+technique used in this program was described by Robin Houston,
+and works by first decorating the blank grid with the over/under
+crossings, and then using Kruskal's algorithm to fill out the rest
+of the grid. (Kruskal's is very well-suited to this approach, since
+it treats the cells as separate sets and joins them together.)
+
+Please note: this program was oringally ported from
+https://gist.github.com/856138
+
+Usage:
+  maze -h
+  maze pdf FILENAME [-W WIDTH] [-H HEIGHT] [-p PAGE_SIZE] [-d DENSITY] [-S] [-L] [-O ORIENTATION] [-i MAZE_ID]
+  maze text [-W WIDTH] [-H HEIGHT] [-p PAGE_SIZE] [-d DENSITY] [-L] [-i MAZE_ID]
+  maze svg FILENAME [-W WIDTH] [-H HEIGHT] [-p PAGE_SIZE] [-d DENSITY] [-S] [-L] [-i MAZE_ID] [-s SOLUTION_FILENAME]
+
+Options:
+  -h, --help                        Show this help message and exit
+
+  -W --width WIDTH                  Number of cells wide [default: 21]
+  -H --height HEIGHT                Number of cells high [default: 30]
+
+  -d --density DENSITY              Density of under/overs [default: 50]
+
+  -L                                Enable a loop
+
+  -S                                Draw with straight lines instead of curves
+
+  -p PAGE_SIZE                      Page size, (A0,A4 or Letter) [default: A4]
+  -O --orientation ORIENTATION      Orientation, P=portrait, L=landscape [default: P]
+
+  -i --maze_id MAZE_ID              Identify which maze, otherwise a random maze will be generated
+
+  -s --solution SOLUTION_FILENAME   Save the solution to the maze to a file
+
+Examples:
+
+maze pdf my_new_maze.pdf
+

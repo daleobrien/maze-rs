@@ -1,0 +1,11 @@
+[package]
+name = "maze"
+version = "3.0.0"
+edition = "2021"
+description = "Application that generates weave mazes (Rust port of the Python maze generator)"
+license = "MIT"
+
+[dependencies]
+flate2 = "1"
+sha2 = "0.10"
+uuid = { version = "1", features = ["v4"] }
