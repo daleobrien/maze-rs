@@ -48,5 +48,8 @@ const CASES: &[(&str, usize, usize, i64, bool, &str)] = &[
     ("sparse", 40, 40, 90, true, "9082904b3a826c17279591a1ca22bb830534b5b1b8ee24657c68bb12d58fedfa"),
     ("big", 120, 84, 50, false, "eedc26ec006c34bd647707d98ba6a01d2d6fbc57d1f071729935dd0695bb08f8"),
     ("tall", 3, 60, 50, false, "252d6b98c36c46b6294cfbb67e096435d6839adf5595d4f966f8b9b32c906a20"),
+    ("odd-bands", 97, 61, 30, true, "112c84e25eacc7737d5d036f136fae2f7f6960259fcc097c9e9ab672be5c5722"),
+    ("wide", 250, 20, 50, false, "ce29666534fe17f992da80b3df8c149f75b72ea7d5bb879f8e1bd4ceb92d8cd0"),
+    ("readme-big", 168, 240, 50, true, "67d9431d28a6e4736b7270515777bd2ba8ec2cd339eeca41478501710bcafaab"),
     ("one", 1, 1, 50, false, "1820aed91eb3adad3668d55748660ad05e0884b354f07d3f48dbff5c81bc45fe"),
 ];

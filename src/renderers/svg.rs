@@ -2,7 +2,9 @@ use std::f64::consts::PI;
 use std::fmt::Write as _;
 
 use crate::maze::{Grid, CROSS_EW, CROSS_NS};
-use crate::renderers::{page_size, push_fixed, py_float_repr, PageSize};
+use std::ops::Range;
+
+use crate::renderers::{map_row_bands, page_size, push_fixed_trimmed, py_float_repr, PageSize};
 
 const QUARTER: f64 = PI / 2.0;
 const HALF: f64 = PI;
@@ -12,16 +14,7 @@ const FULL: f64 = 2.0 * PI;
 /// Round to two decimals and strip trailing zeros after the decimal point,
 /// appending the result to `out`.
 fn push_round(out: &mut String, x: f64) {
-    let start = out.len();
-    push_fixed(out, x, 2);
-    if out[start..].contains('.') {
-        while out.ends_with('0') {
-            out.pop();
-        }
-        if out.ends_with('.') {
-            out.pop();
-        }
-    }
+    push_fixed_trimmed(out, x, 2);
 }
 
 /// Round to two decimals and strip trailing zeros after the decimal point.
@@ -390,11 +383,12 @@ impl SvgPath {
 
     // ---- maze walls ----
 
-    fn render_walls(&mut self, grid: &Grid) {
+    /// Draw the walls of the given rows of the maze.
+    fn render_walls(&mut self, grid: &Grid, rows: Range<usize>) {
         let left_margin = 0.0;
         let top_margin = 0.0;
 
-        for (j, row) in grid.iter().enumerate() {
+        for (j, row) in grid.iter().enumerate().take(rows.end).skip(rows.start) {
             let y = top_margin + j as f64 * self.s;
 
             for (i, &cell) in row.iter().enumerate() {
@@ -746,7 +740,17 @@ pub fn svg_render(grid: &Grid, width: usize, height: usize, page: PageSize, draw
     let mut over_trace = SvgPath::new("#E51919", 5, "1.0", s, draw_with_curves, false); // solution
     let mut under_trace = SvgPath::new("#E51919", 5, "0.2", s, draw_with_curves, true); // faint solution lines
 
-    walls.render_walls(grid);
+    // rows are independent, so bands of them are drawn in parallel and joined
+    let bands = map_row_bands(grid.len(), grid.first().map_or(0, |r| r.len()), |rows| {
+        let mut band = SvgPath::new("#000000", stroke_width, "1.0", s, draw_with_curves, false);
+        band.render_walls(grid, rows);
+        (band.svg, band.dots)
+    });
+    walls.svg.reserve(bands.iter().map(|b| b.0.len()).sum());
+    for (svg, dots) in bands {
+        walls.svg.push_str(&svg);
+        walls.dots.push_str(&dots);
+    }
     let solution = solution.filter(|s| !s.is_empty());
     if let Some(trail) = solution {
         over_trace.render_trace(grid, trail);

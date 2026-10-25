@@ -4,41 +4,32 @@
 
 use std::f64::consts::PI;
 use std::io::Write;
+use std::ops::Range;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use flate2::write::ZlibEncoder;
-use flate2::Compression;
+use flate2::{Compress, Compression, FlushCompress, Status};
 
 use crate::maze::Grid;
-use crate::renderers::{page_size, push_fixed, PageSize};
+use crate::renderers::{map_row_bands, page_size, push_fixed_trimmed, PageSize};
 
 /// ReportLab's `fp_str` for a single number, appended to `out`.
-fn push_fp_num(out: &mut String, x: f64) {
+///
+/// Returns the value of the written number, i.e. what parsing it back would
+/// give.
+fn push_fp_num(out: &mut String, x: f64) -> f64 {
     let sa = x.abs();
     if sa <= 1e-7 {
         out.push('0');
-        return;
+        return 0.0;
     }
     let l = if sa <= 1.0 { 6 } else { (6 - sa.log10() as i64).clamp(0, 6) as usize };
     let start = out.len();
-    push_fixed(out, x, l);
-    if l > 0 {
-        let bytes = out.as_bytes();
-        let mut j = bytes.len();
-        while j > start {
-            j -= 1;
-            if bytes[j] != b'0' {
-                if bytes[j] != b'.' {
-                    j += 1;
-                }
-                break;
-            }
-        }
-        out.truncate(j);
-    }
+    let value = push_fixed_trimmed(out, x, l);
     if out.as_bytes()[start] == b'0' && out.len() - start > 1 {
         out.remove(start);
     }
+    value
 }
 
 /// ReportLab's `fp_str` for several numbers, appended to `out`.
@@ -163,8 +154,9 @@ impl Path {
 /// Operators are written straight into one buffer, one per line.
 struct Canvas {
     code: String,
-    /// Where the last operator starts, if it is a `cm` transform.
-    last_cm: Option<usize>,
+    /// Where the last operator starts and the values it holds (as written),
+    /// if it is a `cm` transform.
+    last_cm: Option<(usize, [f64; 6])>,
 }
 
 impl Canvas {
@@ -185,20 +177,22 @@ impl Canvas {
 
     fn push_cm(&mut self, values: &[f64; 6]) {
         self.begin_op();
-        self.last_cm = Some(self.code.len());
-        push_fp_str(&mut self.code, values);
+        let start = self.code.len();
+        let mut written = [0.0; 6];
+        for (i, (&x, w)) in values.iter().zip(&mut written).enumerate() {
+            if i > 0 {
+                self.code.push(' ');
+            }
+            *w = push_fp_num(&mut self.code, x);
+        }
         self.code.push_str(" cm");
+        self.last_cm = Some((start, written));
     }
 
     fn translate(&mut self, dx: f64, dy: f64) {
         // ReportLab folds consecutive transforms into one `cm` operator,
         // re-reading the previous (already formatted) values.
-        if let Some(start) = self.last_cm {
-            let mut v = [0.0; 6];
-            for (slot, t) in v.iter_mut().zip(self.code[start..].split_whitespace()) {
-                *slot = t.parse().unwrap();
-            }
-            let [a0, b0, c0, d0, e0, f0] = v;
+        if let Some((start, [a0, b0, c0, d0, e0, f0])) = self.last_cm {
             let (a, b, c, d) = (1.0, 0.0, 0.0, 1.0);
             // drop the old operator and its line break; push_cm adds them back
             self.code.truncate(start - 1);
@@ -576,42 +570,148 @@ pub fn pdf_content(grid: &Grid, options: &PdfOptions) -> (String, f64, f64) {
         }
         p
     };
-    let mut tile_cache: [Option<String>; 32] = Default::default();
 
-    for (j, row) in grid.iter().enumerate() {
-        // upper/lower rows
-        for (i, &cell) in row.iter().enumerate() {
-            let x_offset = left_margin + i as f64 * s;
-            let y_offset = top_margin + j as f64 * s;
+    // a tile is drawn relative to its own cell, so every cell of the same
+    // kind has the same path
+    let tiles: Vec<String> = (0..32).map(|cell| tile_path(cell, false, false).code).collect();
 
-            c.translate(x_offset, y_offset);
-            c.set_stroke_rgb(0.0, 0.0, 0.0);
+    let draw_rows = |c: &mut Canvas, rows: Range<usize>| {
+        for (j, row) in grid.iter().enumerate().take(rows.end).skip(rows.start) {
+            // upper/lower rows
+            for (i, &cell) in row.iter().enumerate() {
+                let x_offset = left_margin + i as f64 * s;
+                let y_offset = top_margin + j as f64 * s;
 
-            // mark start and end
-            let start = i == 0 && j == height - 1;
-            let end = i == org_width - 1 && j == 0;
+                c.translate(x_offset, y_offset);
+                c.set_stroke_rgb(0.0, 0.0, 0.0);
 
-            if start || end {
-                c.set_stroke_rgb(0.9, 0.1, 0.1);
-                c.set_fill_rgb(0.9, 0.1, 0.1);
-                let mut p = Path::new();
-                p.circle(s / 2.0, s / 2.0, g / 1.5);
-                c.draw_path(&p, true);
+                // mark start and end
+                let start = i == 0 && j == height - 1;
+                let end = i == org_width - 1 && j == 0;
 
-                c.draw_path(&tile_path(cell, start, end), false);
-            } else {
-                // a tile is drawn relative to its own cell, so every cell of
-                // the same kind has the same path
-                let code = tile_cache[usize::from(cell)].get_or_insert_with(|| tile_path(cell, false, false).code);
-                c.draw_path_code(code, false);
+                if start || end {
+                    c.set_stroke_rgb(0.9, 0.1, 0.1);
+                    c.set_fill_rgb(0.9, 0.1, 0.1);
+                    let mut p = Path::new();
+                    p.circle(s / 2.0, s / 2.0, g / 1.5);
+                    c.draw_path(&p, true);
+
+                    c.draw_path(&tile_path(cell, start, end), false);
+                } else {
+                    c.draw_path_code(&tiles[usize::from(cell)], false);
+                }
+                c.translate(-x_offset, -y_offset);
             }
-            c.translate(-x_offset, -y_offset);
+        }
+    };
+
+    // Bands of rows are drawn in parallel. Each cell's first transform is
+    // merged with the one that undid the previous cell, so a band starts
+    // from that transform and the band before it drops its copy.
+    let row_len = grid.first().map_or(0, |r| r.len());
+    let bands = map_row_bands(grid.len(), row_len, |rows| {
+        let mut c = Canvas::new("");
+        if rows.start > 0 {
+            let (i, j) = (row_len - 1, rows.start - 1);
+            c.push_cm(&[1.0, 0.0, 0.0, 1.0, -(left_margin + i as f64 * s), -(top_margin + j as f64 * s)]);
+        }
+        draw_rows(&mut c, rows);
+        c
+    });
+    let last = bands.len() - 1;
+    for (k, band) in bands.into_iter().enumerate() {
+        match band.last_cm {
+            Some((start, _)) if k < last => c.code.push_str(&band.code[..start - 1]),
+            _ => c.code.push_str(&band.code),
         }
     }
 
     let mut content = c.code;
     content.push_str("\n \n");
     (content, page_width, page_height)
+}
+
+/// Below this a content stream is compressed on one thread.
+const PARALLEL_COMPRESS_MIN_BYTES: usize = 1 << 20;
+
+/// Compress `data` into a zlib stream.
+///
+/// Large inputs are split into pieces that are deflated in parallel, each
+/// ending on a byte boundary (a sync flush), so the pieces join into one
+/// ordinary zlib stream, as `pigz` does.
+fn zlib_compress(data: &[u8]) -> Vec<u8> {
+    if data.len() < PARALLEL_COMPRESS_MIN_BYTES {
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(data).unwrap();
+        return encoder.finish().unwrap();
+    }
+
+    let pieces = map_row_bands(data.len(), 1, |range| {
+        let last = range.end == data.len();
+        let input = &data[range.clone()];
+        let mut deflate = Compress::new(Compression::default(), false);
+        let mut out = Vec::with_capacity(input.len() / 4 + 1024);
+        let flush = if last { FlushCompress::Finish } else { FlushCompress::Sync };
+        loop {
+            let consumed = deflate.total_in() as usize;
+            let status = deflate.compress_vec(&input[consumed..], &mut out, flush).unwrap();
+            let done = deflate.total_in() as usize == input.len() && out.len() < out.capacity();
+            if status == Status::StreamEnd || (!last && done) {
+                break;
+            }
+            out.reserve(out.capacity().max(1024));
+        }
+        (out, adler32(input), input.len())
+    });
+
+    // zlib header for the default compression level
+    let mut out = vec![0x78, 0x9c];
+    let mut checksum = 1;
+    for (piece, piece_checksum, len) in pieces {
+        out.extend_from_slice(&piece);
+        checksum = adler32_combine(checksum, piece_checksum, len);
+    }
+    out.extend_from_slice(&checksum.to_be_bytes());
+    out
+}
+
+const ADLER_BASE: u32 = 65_521;
+
+fn adler32(data: &[u8]) -> u32 {
+    let (mut a, mut b) = (1u32, 0u32);
+    // the most bytes that can be summed before the sums can overflow
+    for chunk in data.chunks(5552) {
+        for &byte in chunk {
+            a += u32::from(byte);
+            b += a;
+        }
+        a %= ADLER_BASE;
+        b %= ADLER_BASE;
+    }
+    (b << 16) | a
+}
+
+/// The Adler-32 of two pieces joined, from the checksum of each and the
+/// length of the second (zlib's `adler32_combine`).
+fn adler32_combine(adler1: u32, adler2: u32, len2: usize) -> u32 {
+    let rem = (len2 % ADLER_BASE as usize) as u32;
+    let mut sum1 = adler1 & 0xffff;
+    let mut sum2 = (rem * sum1) % ADLER_BASE;
+    sum1 += (adler2 & 0xffff) + ADLER_BASE - 1;
+    sum2 += (adler1 >> 16) + (adler2 >> 16) + ADLER_BASE - rem;
+    if sum1 >= ADLER_BASE {
+        sum1 -= ADLER_BASE;
+    }
+    if sum1 >= ADLER_BASE {
+        sum1 -= ADLER_BASE;
+    }
+    if sum2 >= 2 * ADLER_BASE {
+        sum2 -= 2 * ADLER_BASE;
+    }
+    if sum2 >= ADLER_BASE {
+        sum2 -= ADLER_BASE;
+    }
+    (sum2 << 16) | sum1
 }
 
 /// Current UTC time in PDF date format.
@@ -640,9 +740,7 @@ fn pdf_date() -> String {
 pub fn pdf_render(grid: &Grid, options: &PdfOptions) -> Vec<u8> {
     let (content, page_width, page_height) = pdf_content(grid, options);
 
-    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
-    encoder.write_all(content.as_bytes()).unwrap();
-    let stream = encoder.finish().unwrap();
+    let stream = zlib_compress(content.as_bytes());
 
     let date = pdf_date();
     let media_box = fp_str(&[0.0, 0.0, page_width, page_height]);
@@ -690,6 +788,21 @@ pub fn pdf_render(grid: &Grid, options: &PdfOptions) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parallel_compression_round_trips() {
+        use std::io::Read;
+
+        let data: Vec<u8> = (0..3_000_000u32).flat_map(|i| format!("{} {} l ", i % 997, i / 7).into_bytes()).collect();
+        let compressed = zlib_compress(&data);
+        let mut decoded = Vec::new();
+        // the decoder checks the Adler-32 trailer too
+        flate2::read::ZlibDecoder::new(&compressed[..]).read_to_end(&mut decoded).unwrap();
+        assert!(decoded == data);
+
+        let small = b"1 0 0 1 0 0 cm S";
+        assert_eq!(adler32_combine(adler32(&small[..5]), adler32(&small[5..]), small.len() - 5), adler32(small));
+    }
 
     #[test]
     fn fp_str_matches_reportlab() {

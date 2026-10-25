@@ -1,4 +1,5 @@
 use std::fmt::Write as _;
+use std::ops::Range;
 
 pub mod pdf;
 pub mod svg;
@@ -32,16 +33,51 @@ pub fn py_float_repr(x: f64) -> String {
     }
 }
 
+/// Mazes with fewer cells than this are rendered on one thread; below it
+/// starting threads costs more than it saves.
+const PARALLEL_MIN_CELLS: usize = 4096;
+
+/// Split `rows` rows into consecutive bands, run `f` on each (in parallel
+/// when the maze is large enough) and return the results in row order.
+pub(crate) fn map_row_bands<T: Send>(rows: usize, cols: usize, f: impl Fn(Range<usize>) -> T + Sync) -> Vec<T> {
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+    if threads == 1 || rows * cols < PARALLEL_MIN_CELLS {
+        return vec![f(0..rows)];
+    }
+    let bands = threads.min(rows);
+    let band = |k: usize| k * rows / bands..(k + 1) * rows / bands;
+    std::thread::scope(|scope| {
+        let f = &f;
+        let handles: Vec<_> = (1..bands).map(|k| scope.spawn(move || f(band(k)))).collect();
+        let mut results = vec![f(band(0))];
+        results.extend(handles.into_iter().map(|h| h.join().unwrap()));
+        results
+    })
+}
+
 /// Append `x` with `digits` decimal places, exactly as `format!("{x:.digits$}")`
 /// would, but without going through the general float formatter.
 ///
 /// The value is scaled by a power of ten using exact integer arithmetic and
 /// rounded half to even, which is what the standard library does.
 pub fn push_fixed(out: &mut String, x: f64, digits: usize) {
-    const POW10: [u128; 7] = [1, 10, 100, 1_000, 10_000, 100_000, 1_000_000];
-    if !x.is_finite() || x.abs() >= (1u64 << 53) as f64 || digits >= POW10.len() {
-        write!(out, "{x:.digits$}").unwrap();
-        return;
+    push_fixed_impl(out, x, digits, false);
+}
+
+/// Like [`push_fixed`], then strips trailing zeros after the decimal point
+/// (and the point itself if nothing is left after it).
+///
+/// Returns the value of the written number, i.e. what parsing it back would
+/// give.
+pub fn push_fixed_trimmed(out: &mut String, x: f64, digits: usize) -> f64 {
+    push_fixed_impl(out, x, digits, true)
+}
+
+fn push_fixed_impl(out: &mut String, x: f64, digits: usize, trim: bool) -> f64 {
+    const POW10: [u64; 7] = [1, 10, 100, 1_000, 10_000, 100_000, 1_000_000];
+    // beyond this the scaled value might not fit in 53 bits
+    if !x.is_finite() || x.abs() >= 1e9 || digits >= POW10.len() {
+        return push_fixed_slow(out, x, digits, trim);
     }
 
     // x = mantissa * 2^exponent
@@ -50,9 +86,10 @@ pub fn push_fixed(out: &mut String, x: f64, digits: usize) {
     let fraction = bits & ((1u64 << 52) - 1);
     let (mantissa, exponent) = if biased == 0 { (fraction, -1074) } else { (fraction | (1u64 << 52), biased - 1075) };
 
-    let scaled = u128::from(mantissa) * POW10[digits];
+    let unit = POW10[digits];
+    let scaled = u128::from(mantissa) * u128::from(unit);
     let q = if exponent >= 0 {
-        // |x| < 2^53, so the shift can't overflow
+        // |x| < 1e9, so the shift can't overflow
         scaled << exponent
     } else {
         let shift = (-exponent) as u32;
@@ -68,16 +105,65 @@ pub fn push_fixed(out: &mut String, x: f64, digits: usize) {
                 q
             }
         }
-    };
+    } as u64;
 
+    // digits are written backwards into a small buffer
+    let mut buf = [0u8; 32];
+    let mut pos = buf.len();
+    let (mut int_part, mut frac) = (q / unit, q % unit);
+    let mut frac_digits = digits;
+    if trim {
+        while frac_digits > 0 && frac % 10 == 0 {
+            frac /= 10;
+            frac_digits -= 1;
+        }
+    }
+    if frac_digits > 0 {
+        for _ in 0..frac_digits {
+            pos -= 1;
+            buf[pos] = b'0' + (frac % 10) as u8;
+            frac /= 10;
+        }
+        pos -= 1;
+        buf[pos] = b'.';
+    }
+    loop {
+        pos -= 1;
+        buf[pos] = b'0' + (int_part % 10) as u8;
+        int_part /= 10;
+        if int_part == 0 {
+            break;
+        }
+    }
     if x.is_sign_negative() {
-        out.push('-');
+        pos -= 1;
+        buf[pos] = b'-';
     }
-    let unit = POW10[digits];
-    write!(out, "{}", q / unit).unwrap();
-    if digits > 0 {
-        write!(out, ".{:0digits$}", q % unit).unwrap();
+    // only ASCII digits, '.' and '-' were written
+    out.push_str(std::str::from_utf8(&buf[pos..]).unwrap());
+
+    // q and unit are exact, so this division rounds the decimal just like
+    // parsing it would
+    let value = q as f64 / unit as f64;
+    if x.is_sign_negative() {
+        -value
+    } else {
+        value
     }
+}
+
+fn push_fixed_slow(out: &mut String, x: f64, digits: usize, trim: bool) -> f64 {
+    let start = out.len();
+    write!(out, "{x:.digits$}").unwrap();
+    if trim && out[start..].contains('.') {
+        while out.ends_with('0') {
+            out.pop();
+        }
+        if out.ends_with('.') {
+            out.pop();
+        }
+    }
+    out[start..].parse().unwrap_or(x)
 }
 
 #[cfg(test)]
@@ -88,7 +174,14 @@ mod tests {
         for digits in 0..=6 {
             let mut got = String::new();
             push_fixed(&mut got, x, digits);
-            assert_eq!(got, format!("{x:.digits$}"), "x={x:e} digits={digits}");
+            let want = format!("{x:.digits$}");
+            assert_eq!(got, want, "x={x:e} digits={digits}");
+
+            let mut trimmed = String::new();
+            let value = push_fixed_trimmed(&mut trimmed, x, digits);
+            let want = if want.contains('.') { want.trim_end_matches('0').trim_end_matches('.') } else { &want };
+            assert_eq!(trimmed, want, "x={x:e} digits={digits}");
+            assert_eq!(value.to_bits(), trimmed.parse::<f64>().unwrap().to_bits(), "x={x:e} digits={digits}");
         }
     }
 
