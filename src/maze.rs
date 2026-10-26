@@ -116,14 +116,6 @@ impl Sets {
         self.root_of((y * self.width + x) as u32)
     }
 
-    fn connected(&mut self, a: (usize, usize), b: (usize, usize)) -> bool {
-        self.root(a) == self.root(b)
-    }
-
-    fn connect(&mut self, (ax, ay): (usize, usize), (bx, by): (usize, usize)) {
-        self.join((ay * self.width + ax) as u32, (by * self.width + bx) as u32);
-    }
-
     /// Connect cells `a` and `b` (by number), returning false if they
     /// already were.
     fn join(&mut self, a: u32, b: u32) -> bool {
@@ -131,16 +123,18 @@ impl Sets {
         if ra == rb {
             return false;
         }
-        let (rank_a, rank_b) = (self.rank[ra as usize], self.rank[rb as usize]);
-        if rank_a < rank_b {
-            self.parent[ra as usize] = rb;
-        } else {
-            self.parent[rb as usize] = ra;
-            if rank_a == rank_b {
-                self.rank[ra as usize] += 1;
-            }
-        }
+        self.link(ra, rb);
         true
+    }
+
+    /// Join the sets with (different) roots `ra` and `rb`.
+    fn link(&mut self, ra: u32, rb: u32) {
+        // which way round is random, so this is written to compile to
+        // conditional moves rather than branches
+        let (rank_a, rank_b) = (self.rank[ra as usize], self.rank[rb as usize]);
+        let (child, root) = if rank_a < rank_b { (ra, rb) } else { (rb, ra) };
+        self.parent[child as usize] = root;
+        self.rank[root as usize] += u8::from(rank_a == rank_b);
     }
 }
 
@@ -159,53 +153,84 @@ pub fn create_maze(width: usize, height: usize, density: i64, add_a_loop: bool, 
     let mut grid = Grid::new(width, height);
     let mut sets = Sets::new(width, height);
 
-    // build the over/under locations
+    // pick the cells to try for an over/under crossing; written without a
+    // branch on the (random) outcome, since a mispredicted branch per cell
+    // costs more than the rest of the work here
+    let mut candidates = vec![(0usize, 0usize); width.saturating_sub(2) * height.saturating_sub(2)];
+    let mut picked = 0;
     for cy in 1..height.saturating_sub(1) {
         for cx in 1..width.saturating_sub(1) {
-            if (rng.below(100) as i64) < density {
-                continue;
-            }
-
-            let north = (cx, cy - 1);
-            let west = (cx - 1, cy);
-            let east = (cx + 1, cy);
-            let south = (cx, cy + 1);
-
-            if grid[(cx, cy)] != 0 || sets.connected(north, south) || sets.connected(east, west) {
-                continue;
-            }
-
-            sets.connect(north, south);
-            sets.connect(east, west);
-
-            grid[(cx, cy)] = if rng.coin() { CROSS_EW } else { CROSS_NS };
-
-            grid[north] |= S;
-            grid[west] |= E;
-            grid[east] |= W;
-            grid[south] |= N;
+            candidates[picked] = (cx, cy);
+            picked += usize::from(rng.below(100) as i64 >= density);
         }
+    }
+    candidates.truncate(picked);
+
+    // build the over/under locations
+    for (cx, cy) in candidates {
+        let north = (cx, cy - 1);
+        let west = (cx - 1, cy);
+        let east = (cx + 1, cy);
+        let south = (cx, cy + 1);
+
+        if grid[(cx, cy)] != 0 {
+            continue;
+        }
+        let (root_n, root_s) = (sets.root(north), sets.root(south));
+        if root_n == root_s {
+            continue;
+        }
+        let (root_e, root_w) = (sets.root(east), sets.root(west));
+        if root_e == root_w {
+            continue;
+        }
+
+        // the east/west roots may have moved under the joined north/south
+        // set, but are at most a step from their new root
+        sets.link(root_n, root_s);
+        sets.join(root_e, root_w);
+
+        grid[(cx, cy)] = if rng.coin() { CROSS_EW } else { CROSS_NS };
+
+        grid[north] |= S;
+        grid[west] |= E;
+        grid[east] |= W;
+        grid[south] |= N;
     }
 
     // build the list of the remaining edges, i.e. those not touching a
     // crossing; each one joins a cell to its north or west neighbour, and is
     // packed into a u32 as `cell * 2 + is_west` (cells numbered row by row)
     // so that shuffling and walking the list stays in cache for large mazes
-    let mut edges: Vec<u32> = Vec::with_capacity(2 * width * height);
-    for (y, row) in grid.rows().enumerate() {
-        for (x, &cell) in row.iter().enumerate() {
-            if is_crossing(cell) {
-                continue;
-            }
-            let id = ((y * width + x) * 2) as u32;
-            if y > 0 && !is_crossing(grid[(x, y - 1)]) {
-                edges.push(id);
-            }
-            if x > 0 && !is_crossing(row[x - 1]) {
-                edges.push(id + 1);
-            }
+    //
+    // Whether a crossing is nearby is random, so rather than branch on it,
+    // each candidate edge is always written and the end of the list only
+    // moves past it if it is kept.
+    let open = |cell: u8| usize::from((cell != CROSS_NS) & (cell != CROSS_EW));
+    let mut edges = vec![0u32; 2 * width * height];
+    let mut kept = 0;
+    for x in 1..width {
+        // the top row has no crossings, so only edges to the west
+        edges[kept] = (x * 2 + 1) as u32;
+        kept += 1;
+    }
+    for y in 1..height {
+        let (above, row) = (grid.row(y - 1), grid.row(y));
+        let first = y * width;
+        // the west column has no crossings either, so its north edge is kept
+        // unless the cell above it is one
+        edges[kept] = (first * 2) as u32;
+        kept += open(above[0]);
+        for x in 1..width {
+            let id = ((first + x) * 2) as u32;
+            let here = open(row[x]);
+            edges[kept] = id;
+            kept += here & open(above[x]);
+            edges[kept] = id + 1;
+            kept += here & open(row[x - 1]);
         }
     }
+    edges.truncate(kept);
 
     rng.shuffle(&mut edges);
 
