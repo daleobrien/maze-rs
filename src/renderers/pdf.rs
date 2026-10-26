@@ -154,59 +154,21 @@ impl Path {
 /// Operators are written straight into one buffer, one per line.
 struct Canvas {
     code: String,
-    /// Where the last operator starts and the values it holds (as written),
-    /// if it is a `cm` transform.
-    last_cm: Option<(usize, [f64; 6])>,
 }
 
 impl Canvas {
     fn new(preamble: &str) -> Self {
-        Canvas { code: preamble.to_string(), last_cm: None }
+        Canvas { code: preamble.to_string() }
     }
 
     /// Start a new operator line.
     fn begin_op(&mut self) {
         self.code.push('\n');
-        self.last_cm = None;
     }
 
     fn push_op(&mut self, op: &str) {
         self.begin_op();
         self.code.push_str(op);
-    }
-
-    fn push_cm(&mut self, values: &[f64; 6]) {
-        self.begin_op();
-        let start = self.code.len();
-        let mut written = [0.0; 6];
-        for (i, (&x, w)) in values.iter().zip(&mut written).enumerate() {
-            if i > 0 {
-                self.code.push(' ');
-            }
-            *w = push_fp_num(&mut self.code, x);
-        }
-        self.code.push_str(" cm");
-        self.last_cm = Some((start, written));
-    }
-
-    fn translate(&mut self, dx: f64, dy: f64) {
-        // ReportLab folds consecutive transforms into one `cm` operator,
-        // re-reading the previous (already formatted) values.
-        if let Some((start, [a0, b0, c0, d0, e0, f0])) = self.last_cm {
-            let (a, b, c, d) = (1.0, 0.0, 0.0, 1.0);
-            // drop the old operator and its line break; push_cm adds them back
-            self.code.truncate(start - 1);
-            self.push_cm(&[
-                a0 * a + c0 * b,
-                b0 * a + d0 * b,
-                a0 * c + c0 * d,
-                b0 * c + d0 * d,
-                a0 * dx + c0 * dy + e0,
-                b0 * dx + d0 * dy + f0,
-            ]);
-            return;
-        }
-        self.push_cm(&[1.0, 0.0, 0.0, 1.0, dx, dy]);
     }
 
     fn set_line_width(&mut self, width: f64) {
@@ -550,6 +512,77 @@ impl Tiles {
     }
 }
 
+/// The `cm` transforms that move to each cell, written once per column and
+/// row rather than once per cell.
+///
+/// ReportLab moves to a cell with `translate(x, y)` and back with
+/// `translate(-x, -y)`, and folds each move into the transform before it,
+/// re-reading that one's (already formatted) values. So a cell's transform is
+/// `1 0 0 1 x' y' cm`, where `x'` is its `x` plus the written `-x` of the cell
+/// before, and likewise for `y'`: it depends only on the two cells' columns
+/// and the two cells' rows.
+struct Placement {
+    /// The `x'` of each column; the first column's follows the last column
+    /// of the row above.
+    x: Vec<String>,
+    /// The `y'` of each row when the cell before is in the same row...
+    y_along: Vec<String>,
+    /// ...and when it is at the end of the row above.
+    y_down: Vec<String>,
+    /// The move to the first cell, which follows no other move.
+    first: String,
+    /// The move back from the last cell, which nothing follows.
+    last: String,
+}
+
+impl Placement {
+    fn new(xs: &[f64], ys: &[f64]) -> Self {
+        // the written value of each move back
+        let back = |xs: &[f64]| -> Vec<f64> { xs.iter().map(|&x| push_fp_num(&mut String::new(), -x)).collect() };
+        let (back_x, back_y) = (back(xs), back(ys));
+
+        // ReportLab's `a0 * dx + c0 * dy + e0` (and likewise for y), where the
+        // folded transform's `a0` is 1 and `c0` is 0; the maze sits inside the
+        // margins, so the other offset is positive and `0 * dy` adds nothing
+        let fold = |d: f64, e0: f64| {
+            let mut out = String::new();
+            push_fp_num(&mut out, d + e0);
+            out
+        };
+        let columns = xs.len();
+        let x = (0..columns).map(|i| fold(xs[i], back_x[(i + columns - 1) % columns])).collect();
+        let y_along = (0..ys.len()).map(|j| fold(ys[j], back_y[j])).collect();
+        let y_down = (0..ys.len()).map(|j| if j == 0 { String::new() } else { fold(ys[j], back_y[j - 1]) }).collect();
+
+        let cm = |x: f64, y: f64| {
+            let mut out = String::from("1 0 0 1 ");
+            push_fp_num(&mut out, x);
+            out.push(' ');
+            push_fp_num(&mut out, y);
+            out.push_str(" cm");
+            out
+        };
+        let first = cm(xs[0], ys[0]);
+        let last = cm(-xs[columns - 1], -ys[ys.len() - 1]);
+        Placement { x, y_along, y_down, first, last }
+    }
+
+    /// Append the move to cell `(i, j)`, folded into the move back from the
+    /// cell before it.
+    fn push_move(&self, c: &mut Canvas, i: usize, j: usize) {
+        if (i, j) == (0, 0) {
+            c.push_op(&self.first);
+            return;
+        }
+        let y = if i == 0 { &self.y_down[j] } else { &self.y_along[j] };
+        c.push_op("1 0 0 1 ");
+        c.code.push_str(&self.x[i]);
+        c.code.push(' ');
+        c.code.push_str(y);
+        c.code.push_str(" cm");
+    }
+}
+
 pub struct PdfOptions {
     pub draw_with_curves: bool,
     pub page: PageSize,
@@ -602,15 +635,16 @@ pub fn pdf_content(grid: &Grid, options: &PdfOptions) -> PageContent {
     // kind has the same path
     let tile_code: Vec<String> = (0..32).map(|cell| tiles.path(cell, false, false).code).collect();
 
+    let xs: Vec<f64> = (0..org_width).map(|i| left_margin + i as f64 * s).collect();
+    let ys: Vec<f64> = (0..height).map(|j| top_margin + j as f64 * s).collect();
+    let placement = Placement::new(&xs, &ys);
+
     let draw_rows = |c: &mut Canvas, rows: Range<usize>| {
         for j in rows {
             // upper/lower rows
             for (i, &cell) in grid.row(j).iter().enumerate() {
-                let x_offset = left_margin + i as f64 * s;
-                let y_offset = top_margin + j as f64 * s;
-
-                c.translate(x_offset, y_offset);
-                c.set_stroke_rgb(0.0, 0.0, 0.0);
+                placement.push_move(c, i, j);
+                c.push_op("0 0 0 RG");
 
                 // mark start and end
                 let start = i == 0 && j == height - 1;
@@ -627,30 +661,24 @@ pub fn pdf_content(grid: &Grid, options: &PdfOptions) -> PageContent {
                 } else {
                     c.draw_path_code(&tile_code[usize::from(cell)], false);
                 }
-                c.translate(-x_offset, -y_offset);
             }
         }
     };
 
-    // Bands of rows are drawn in parallel. Each cell's first transform is
-    // merged with the one that undid the previous cell, so a band starts
-    // from that transform and the band before it drops its copy.
+    // bands of rows are drawn in parallel; each cell's move back is folded
+    // into the next cell's move, so only the last one is written
     let bands = map_bands(height, org_width, |rows| {
-        let mut c = Canvas::new("");
-        if rows.start > 0 {
-            let (i, j) = (org_width - 1, rows.start - 1);
-            c.push_cm(&[1.0, 0.0, 0.0, 1.0, -(left_margin + i as f64 * s), -(top_margin + j as f64 * s)]);
-        }
+        // a cell takes its tile, the operators around it and its move
+        let size = rows.clone().flat_map(|j| grid.row(j)).map(|&cell| tile_code[usize::from(cell)].len() + 64).sum();
+        let mut c = Canvas { code: String::with_capacity(size) };
         draw_rows(&mut c, rows);
-        c
+        c.code
     });
-    let last = bands.len() - 1;
-    for (k, band) in bands.into_iter().enumerate() {
-        match band.last_cm {
-            Some((start, _)) if k < last => c.code.push_str(&band.code[..start - 1]),
-            _ => c.code.push_str(&band.code),
-        }
+    c.code.reserve(bands.iter().map(String::len).sum::<usize>() + placement.last.len() + 4);
+    for band in bands {
+        c.code.push_str(&band);
     }
+    c.push_op(&placement.last);
 
     let mut stream = c.code;
     stream.push_str("\n \n");
