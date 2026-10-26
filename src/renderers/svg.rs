@@ -27,6 +27,75 @@ enum Side {
     Bottom,
 }
 
+fn pos_angle(angle: f64) -> f64 {
+    if angle < 0.0 {
+        angle + FULL
+    } else {
+        angle
+    }
+}
+
+/// One arc of a tile. Everything about it that doesn't depend on where the
+/// tile is (where its ends are relative to its centre, and its radius and
+/// flags as written) is worked out once per render, not once per cell.
+struct ArcShape {
+    start: (f64, f64),
+    end: (f64, f64),
+    /// ` A rx ry 0 large sweep `
+    middle: String,
+}
+
+impl ArcShape {
+    fn new(radius: f64, start_angle: f64, end_angle: f64, dir: i32) -> Self {
+        let s = pos_angle(start_angle);
+        let e = pos_angle(end_angle);
+
+        let diff = e - s;
+        let large = if 0.0 < diff && diff <= PI { 1 - dir } else { dir };
+
+        let mut middle = String::from(" A ");
+        push_round(&mut middle, radius);
+        middle.push(' ');
+        push_round(&mut middle, radius);
+        write!(middle, " 0 {large} {dir} ").expect("writing to a String cannot fail");
+
+        ArcShape { start: (radius * s.cos(), radius * s.sin()), end: (radius * e.cos(), radius * e.sin()), middle }
+    }
+
+    /// Append the arc centred on `(x, y)`, with a line to its start.
+    fn draw(&self, out: &mut String, x: f64, y: f64) {
+        out.push('L');
+        push_round(out, x + self.start.0);
+        out.push(' ');
+        push_round(out, y + self.start.1);
+        out.push_str(&self.middle);
+        push_round(out, x + self.end.0);
+        out.push(' ');
+        push_round(out, y + self.end.1);
+        out.push(' ');
+    }
+}
+
+/// Every arc a tile can have, named after the method that draws it.
+struct Arcs {
+    s0: ArcShape,
+    s1: ArcShape,
+    s2: ArcShape,
+    s3: ArcShape,
+    t5: ArcShape,
+    t6: ArcShape,
+    t9: ArcShape,
+    ta: ArcShape,
+    c1: [ArcShape; 3],
+    c2: [ArcShape; 3],
+    c4: [ArcShape; 3],
+    c8: [ArcShape; 3],
+    c5: ArcShape,
+    c6: ArcShape,
+    c9: ArcShape,
+    ca: ArcShape,
+}
+
 struct SvgPath {
     svg: String,
     dots: String,
@@ -42,16 +111,13 @@ struct SvgPath {
     a2: f64,
     b: f64,
     b2: f64,
-    r3: f64,
     r4: f64,
     g: f64,
     n: f64,
     r: f64,
-    r2: f64,
     q: f64,
     v: f64,
-    delta: f64,
-    theta: f64,
+    arcs: Arcs,
 }
 
 impl SvgPath {
@@ -65,6 +131,43 @@ impl SvgPath {
     ) -> Self {
         let Geometry { s, g, n, r, q, v, theta } = Geometry::new(s);
         let delta = theta - PI / 2.0;
+        // the radii of the small, medium and big quarter circles
+        let (a, r3, r2) = (g, s / 2.0 - g / 2.0, s - g - g);
+        let arc = ArcShape::new;
+        let arcs = Arcs {
+            s0: arc(a, 0.0, QUARTER, 1),
+            s1: arc(a, THREE_QUARTER, FULL, 1),
+            s2: arc(a, QUARTER, HALF, 1),
+            s3: arc(a, THREE_QUARTER, HALF, 0),
+            t5: arc(r3, QUARTER, HALF, 1),
+            t6: arc(r3, THREE_QUARTER, HALF, 0),
+            t9: arc(r3, 0.0, QUARTER, 1),
+            ta: arc(r3, THREE_QUARTER, FULL, 1),
+            c1: [
+                arc(r, HALF, HALF + delta, 0),
+                arc(r3, theta - QUARTER, THREE_QUARTER - theta, 1),
+                arc(r, QUARTER - theta, THREE_QUARTER + theta - delta, 0),
+            ],
+            c2: [
+                arc(r, HALF, HALF - delta, 1),
+                arc(r3, QUARTER - theta, theta - THREE_QUARTER, 0),
+                arc(r, THREE_QUARTER + theta, THREE_QUARTER + theta - delta, 1),
+            ],
+            c4: [
+                arc(r, THREE_QUARTER, THREE_QUARTER + delta, 0),
+                arc(r3, QUARTER + delta, QUARTER + delta - 2.0 * theta, 1),
+                arc(r, HALF - theta, HALF - theta + delta, 0),
+            ],
+            c8: [
+                arc(r, THREE_QUARTER, THREE_QUARTER - delta, 1),
+                arc(r3, QUARTER - delta, QUARTER - delta + 2.0 * theta, 0),
+                arc(r, theta, theta - delta, 1),
+            ],
+            c5: arc(r2, QUARTER, HALF, 1),
+            c6: arc(r2, THREE_QUARTER, HALF, 0),
+            c9: arc(r2, 0.0, QUARTER, 1),
+            ca: arc(r2, THREE_QUARTER, FULL, 1),
+        };
 
         SvgPath {
             svg: String::new(),
@@ -79,18 +182,15 @@ impl SvgPath {
             a2: g / 2.0,
             b: s - g,
             b2: s - g / 2.0,
-            r3: s / 2.0 - g / 2.0,
             r4: s / 2.0 - g,
             g,
             n,
             r,
-            r2: s - g - g,
             s,
             s2: s / 2.0,
             q,
             v,
-            delta,
-            theta,
+            arcs,
         }
     }
 
@@ -113,45 +213,6 @@ impl SvgPath {
         out.push_str(r#"" r=""#);
         push_round(out, self.s / 3.0);
         out.push_str(r##"" fill-opacity="1.0" stroke-opacity="0" fill="#E51919" />"##);
-    }
-
-    fn polar(x: f64, y: f64, radius: f64, angle: f64) -> (f64, f64) {
-        (x + (radius * angle.cos()), y + (radius * angle.sin()))
-    }
-
-    fn pos_angle(angle: f64) -> f64 {
-        if angle < 0.0 {
-            angle + FULL
-        } else {
-            angle
-        }
-    }
-
-    fn arc(&mut self, x: f64, y: f64, radius: f64, start_angle: f64, end_angle: f64, dir: i32) {
-        let s = Self::pos_angle(start_angle);
-        let e = Self::pos_angle(end_angle);
-        let (a, b) = Self::polar(x, y, radius, s);
-        let (c, d) = Self::polar(x, y, radius, e);
-
-        let diff = e - s;
-        let large = if 0.0 < diff && diff <= PI { 1 - dir } else { dir };
-
-        let out = &mut self.svg;
-        out.push('L');
-        push_round(out, a);
-        out.push(' ');
-        push_round(out, b);
-        out.push_str(" A ");
-        let r_start = out.len();
-        push_round(out, radius);
-        let r_end = out.len();
-        out.push(' ');
-        out.extend_from_within(r_start..r_end);
-        write!(out, " 0 {large} {dir} ").expect("writing to a String cannot fail");
-        push_round(out, c);
-        out.push(' ');
-        push_round(out, d);
-        out.push(' ');
     }
 
     /// Append a command and its point, e.g. `M 1.5 2 `.
@@ -301,7 +362,7 @@ impl SvgPath {
         // └─
         self.m(x + self.s, y + self.s2);
         if self.draw_with_curves {
-            self.arc(x + self.b2, y + self.a2, self.r3, QUARTER, HALF, 1);
+            self.arcs.t5.draw(&mut self.svg, x + self.b2, y + self.a2);
         } else {
             self.l(x + self.s2, y + self.s2);
         }
@@ -312,7 +373,7 @@ impl SvgPath {
         // ┌─
         self.m(x + self.s, y + self.s2);
         if self.draw_with_curves {
-            self.arc(x + self.b2, y + self.b2, self.r3, THREE_QUARTER, HALF, 0);
+            self.arcs.t6.draw(&mut self.svg, x + self.b2, y + self.b2);
         } else {
             self.l(x + self.s2, y + self.s2);
         }
@@ -323,7 +384,7 @@ impl SvgPath {
         // ─┘
         self.m(x + self.s2, y);
         if self.draw_with_curves {
-            self.arc(x + self.a2, y + self.a2, self.r3, 0.0, QUARTER, 1);
+            self.arcs.t9.draw(&mut self.svg, x + self.a2, y + self.a2);
         } else {
             self.l(x + self.s2, y + self.s2);
         }
@@ -334,7 +395,7 @@ impl SvgPath {
         // ─┐
         self.m(x, y + self.s2);
         if self.draw_with_curves {
-            self.arc(x + self.a2, y + self.b2, self.r3, THREE_QUARTER, FULL, 1);
+            self.arcs.ta.draw(&mut self.svg, x + self.a2, y + self.b2);
         } else {
             self.l(x + self.s2, y + self.s2);
         }
@@ -420,7 +481,7 @@ impl SvgPath {
         // ┘
         self.m(x + self.a, y);
         if self.draw_with_curves {
-            self.arc(x, y, self.a, 0.0, QUARTER, 1);
+            self.arcs.s0.draw(&mut self.svg, x, y);
         } else {
             self.l(x + self.a, y + self.a);
         }
@@ -431,7 +492,7 @@ impl SvgPath {
         // ┐
         self.m(x, y + self.b);
         if self.draw_with_curves {
-            self.arc(x, y + self.s, self.a, THREE_QUARTER, FULL, 1);
+            self.arcs.s1.draw(&mut self.svg, x, y + self.s);
         } else {
             self.l(x + self.a, y + self.b);
         }
@@ -442,7 +503,7 @@ impl SvgPath {
         // └
         self.m(x + self.s, y + self.a);
         if self.draw_with_curves {
-            self.arc(x + self.s, y, self.a, QUARTER, HALF, 1);
+            self.arcs.s2.draw(&mut self.svg, x + self.s, y);
         } else {
             self.l(x + self.b, y + self.a);
         }
@@ -453,7 +514,7 @@ impl SvgPath {
         // ┌
         self.m(x + self.s, y + self.b);
         if self.draw_with_curves {
-            self.arc(x + self.s, y + self.s, self.a, THREE_QUARTER, HALF, 0);
+            self.arcs.s3.draw(&mut self.svg, x + self.s, y + self.s);
         } else {
             self.l(x + self.b, y + self.b);
         }
@@ -465,23 +526,9 @@ impl SvgPath {
         // └─┘
         self.mv(x + self.b, y, self.q);
         if self.draw_with_curves {
-            self.arc(x + self.s - self.v, y + self.n + self.r, self.r, HALF, HALF + self.delta, 0);
-            self.arc(
-                x + self.s2,
-                y + self.s2,
-                self.s2 - self.g / 2.0,
-                self.theta - QUARTER,
-                THREE_QUARTER - self.theta,
-                1,
-            );
-            self.arc(
-                x + self.v,
-                y + self.n + self.r,
-                self.r,
-                QUARTER - self.theta,
-                THREE_QUARTER + self.theta - self.delta,
-                0,
-            );
+            self.arcs.c1[0].draw(&mut self.svg, x + self.s - self.v, y + self.n + self.r);
+            self.arcs.c1[1].draw(&mut self.svg, x + self.s2, y + self.s2);
+            self.arcs.c1[2].draw(&mut self.svg, x + self.v, y + self.n + self.r);
         } else {
             self.l(x + self.b, y + self.b);
             self.l(x + self.a, y + self.b);
@@ -494,23 +541,9 @@ impl SvgPath {
         // │ │
         self.m(x + self.b, y + self.s);
         if self.draw_with_curves {
-            self.arc(x + self.s - self.v, y + self.s - self.n - self.r, self.r, HALF, HALF - self.delta, 1);
-            self.arc(
-                x + self.s2,
-                y + self.s2,
-                self.s2 - self.g / 2.0,
-                QUARTER - self.theta,
-                self.theta - THREE_QUARTER,
-                0,
-            );
-            self.arc(
-                x + self.v,
-                y + self.s - self.n - self.r,
-                self.r,
-                THREE_QUARTER + self.theta,
-                THREE_QUARTER + self.theta - self.delta,
-                1,
-            );
+            self.arcs.c2[0].draw(&mut self.svg, x + self.s - self.v, y + self.s - self.n - self.r);
+            self.arcs.c2[1].draw(&mut self.svg, x + self.s2, y + self.s2);
+            self.arcs.c2[2].draw(&mut self.svg, x + self.v, y + self.s - self.n - self.r);
         } else {
             self.l(x + self.b, y + self.a);
             self.l(x + self.a, y + self.a);
@@ -523,30 +556,9 @@ impl SvgPath {
         // └──
         self.m(x + self.s, y + self.b);
         if self.draw_with_curves {
-            self.arc(
-                x + self.s - self.n - self.r,
-                y + self.s - self.v,
-                self.r,
-                THREE_QUARTER,
-                THREE_QUARTER + self.delta,
-                0,
-            );
-            self.arc(
-                x + self.s2,
-                y + self.s2,
-                self.s2 - self.g / 2.0,
-                QUARTER + self.delta,
-                QUARTER + self.delta - 2.0 * self.theta,
-                1,
-            );
-            self.arc(
-                x + self.s - self.n - self.r,
-                y + self.v,
-                self.r,
-                HALF - self.theta,
-                HALF - self.theta + self.delta,
-                0,
-            );
+            self.arcs.c4[0].draw(&mut self.svg, x + self.s - self.n - self.r, y + self.s - self.v);
+            self.arcs.c4[1].draw(&mut self.svg, x + self.s2, y + self.s2);
+            self.arcs.c4[2].draw(&mut self.svg, x + self.s - self.n - self.r, y + self.v);
         } else {
             self.l(x + self.g, y + self.b);
             self.l(x + self.a, y + self.a);
@@ -560,16 +572,9 @@ impl SvgPath {
         // ──┘
         self.m(x, y + self.b);
         if self.draw_with_curves {
-            self.arc(x + self.n + self.r, y + self.s - self.v, self.r, THREE_QUARTER, THREE_QUARTER - self.delta, 1);
-            self.arc(
-                x + self.s2,
-                y + self.s2,
-                self.s2 - self.g / 2.0,
-                QUARTER - self.delta,
-                QUARTER - self.delta + 2.0 * self.theta,
-                0,
-            );
-            self.arc(x + self.n + self.r, y + self.v, self.r, self.theta, self.theta - self.delta, 1);
+            self.arcs.c8[0].draw(&mut self.svg, x + self.n + self.r, y + self.s - self.v);
+            self.arcs.c8[1].draw(&mut self.svg, x + self.s2, y + self.s2);
+            self.arcs.c8[2].draw(&mut self.svg, x + self.n + self.r, y + self.v);
         } else {
             self.l(x + self.b, y + self.b);
             self.l(x + self.b, y + self.a);
@@ -586,7 +591,7 @@ impl SvgPath {
         // Big arc
         self.m(x + self.s, y + self.b);
         if self.draw_with_curves {
-            self.arc(x + self.b, y + self.a, self.r2, QUARTER, HALF, 1);
+            self.arcs.c5.draw(&mut self.svg, x + self.b, y + self.a);
         } else {
             self.l(x + self.a, y + self.b);
         }
@@ -599,7 +604,7 @@ impl SvgPath {
         self.s3(x, y);
         self.m(x + self.s, y + self.a);
         if self.draw_with_curves {
-            self.arc(x + self.b, y + self.b, self.r2, THREE_QUARTER, HALF, 0);
+            self.arcs.c6.draw(&mut self.svg, x + self.b, y + self.b);
         } else {
             self.l(x + self.a, y + self.a);
         }
@@ -612,7 +617,7 @@ impl SvgPath {
         self.s0(x, y);
         self.m(x + self.b, y);
         if self.draw_with_curves {
-            self.arc(x + self.a, y + self.a, self.r2, 0.0, QUARTER, 1);
+            self.arcs.c9.draw(&mut self.svg, x + self.a, y + self.a);
         } else {
             self.l(x + self.b, y + self.b);
         }
@@ -625,7 +630,7 @@ impl SvgPath {
         self.s1(x, y);
         self.m(x, y + self.a);
         if self.draw_with_curves {
-            self.arc(x + self.a, y + self.b, self.r2, THREE_QUARTER, FULL, 1);
+            self.arcs.ca.draw(&mut self.svg, x + self.a, y + self.b);
         } else {
             self.l(x + self.b, y + self.a);
         }
@@ -738,6 +743,10 @@ pub fn svg_render(grid: &Grid, page: PageSize, draw_with_curves: bool, solution:
     // rows are independent, so bands of them are drawn in parallel and joined
     let bands = map_bands(grid.height(), grid.width(), |rows| {
         let mut band = SvgPath::new("#000000", stroke_width, "1.0", s, draw_with_curves, false);
+        // a cell averages about 170 bytes with curves and 115 without; growing
+        // the buffer as it fills costs more than the drawing
+        let per_cell = if draw_with_curves { 192 } else { 128 };
+        band.svg.reserve(rows.len() * grid.width() * per_cell);
         band.render_walls(grid, rows);
         (band.svg, band.dots)
     });
