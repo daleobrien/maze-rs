@@ -2,7 +2,7 @@
 //! three renderers. Run with `cargo bench`.
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use maze::random::PyRandom;
+use maze::random::Rng;
 use maze::renderers::pdf::{pdf_render, PdfOptions};
 use maze::renderers::svg::svg_render;
 use maze::renderers::text::text_render;
@@ -13,7 +13,7 @@ use maze::{create_maze, find_solution, Grid};
 const SIZES: &[(usize, usize)] = &[(23, 30), (120, 84), (168, 240)];
 
 fn grid(width: usize, height: usize) -> Grid {
-    create_maze(width, height, 50, false, &mut PyRandom::from_str_seed("bench"))
+    create_maze(width, height, 50, false, &mut Rng::from_str_seed("bench"))
 }
 
 fn label(width: usize, height: usize) -> String {
@@ -21,7 +21,7 @@ fn label(width: usize, height: usize) -> String {
 }
 
 fn bench_seed(c: &mut Criterion) {
-    c.bench_function("seed", |b| b.iter(|| PyRandom::from_str_seed(black_box("6f1c2a2e-bench"))));
+    c.bench_function("seed", |b| b.iter(|| Rng::from_str_seed(black_box("6f1c2a2e-bench"))));
 }
 
 fn bench_create(c: &mut Criterion) {

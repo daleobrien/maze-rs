@@ -1,7 +1,7 @@
 use std::io;
 use std::process::ExitCode;
 
-use maze::random::PyRandom;
+use maze::random::Rng;
 use maze::renderers::pdf::{pdf_render, PdfOptions};
 use maze::renderers::svg::svg_render;
 use maze::renderers::text::text_render;
@@ -262,7 +262,7 @@ fn run(Args { command, options }: Args) -> Result<(), Exit> {
 
     // allow the same maze to be generated if a maze_id is given.
     let maze_id = options.maze_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let mut rng = PyRandom::from_str_seed(&maze_id);
+    let mut rng = Rng::from_str_seed(&maze_id);
 
     let page = parse_page(options.page.as_deref().unwrap_or("A4"))?;
     println!("width = {width}, height={height}");

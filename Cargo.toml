@@ -7,11 +7,11 @@ license = "MIT"
 
 [dependencies]
 flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
-sha2 = "0.10"
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 criterion = "0.5"
+sha2 = "0.10"
 
 [[bench]]
 name = "maze"

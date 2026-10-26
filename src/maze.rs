@@ -8,7 +8,7 @@
 
 use std::ops::{Index, IndexMut};
 
-use crate::random::PyRandom;
+use crate::random::Rng;
 
 // constants to aid with describing the passage directions
 pub const N: u8 = 0x1;
@@ -86,32 +86,61 @@ impl IndexMut<(usize, usize)> for Grid {
 
 /// Disjoint sets of cells; only "are these connected?" matters to the
 /// algorithm, so a plain union-find is equivalent to the Python `Tree` class.
+///
+/// Cells are numbered row by row (`y * width + x`), and parents are `u32`
+/// so the table stays small enough to sit in cache for large mazes. Sets are
+/// joined by rank, which keeps the trees shallow; how they are joined can't
+/// change the maze, since only connectedness is ever asked.
 struct Sets {
-    parent: Vec<usize>,
+    parent: Vec<u32>,
+    rank: Vec<u8>,
     width: usize,
 }
 
 impl Sets {
     fn new(width: usize, height: usize) -> Self {
-        Sets { parent: (0..width * height).collect(), width }
+        let cells = u32::try_from(width * height).expect("a maze has at most u32::MAX cells");
+        Sets { parent: (0..cells).collect(), rank: vec![0; cells as usize], width }
     }
 
-    fn root(&mut self, (x, y): (usize, usize)) -> usize {
-        let mut i = y * self.width + x;
-        while self.parent[i] != i {
-            self.parent[i] = self.parent[self.parent[i]];
-            i = self.parent[i];
+    fn root_of(&mut self, mut i: u32) -> u32 {
+        while self.parent[i as usize] != i {
+            let grandparent = self.parent[self.parent[i as usize] as usize];
+            self.parent[i as usize] = grandparent;
+            i = grandparent;
         }
         i
+    }
+
+    fn root(&mut self, (x, y): (usize, usize)) -> u32 {
+        self.root_of((y * self.width + x) as u32)
     }
 
     fn connected(&mut self, a: (usize, usize), b: (usize, usize)) -> bool {
         self.root(a) == self.root(b)
     }
 
-    fn connect(&mut self, a: (usize, usize), b: (usize, usize)) {
-        let (ra, rb) = (self.root(a), self.root(b));
-        self.parent[rb] = ra;
+    fn connect(&mut self, (ax, ay): (usize, usize), (bx, by): (usize, usize)) {
+        self.join((ay * self.width + ax) as u32, (by * self.width + bx) as u32);
+    }
+
+    /// Connect cells `a` and `b` (by number), returning false if they
+    /// already were.
+    fn join(&mut self, a: u32, b: u32) -> bool {
+        let (ra, rb) = (self.root_of(a), self.root_of(b));
+        if ra == rb {
+            return false;
+        }
+        let (rank_a, rank_b) = (self.rank[ra as usize], self.rank[rb as usize]);
+        if rank_a < rank_b {
+            self.parent[ra as usize] = rb;
+        } else {
+            self.parent[rb as usize] = ra;
+            if rank_a == rank_b {
+                self.rank[ra as usize] += 1;
+            }
+        }
+        true
     }
 }
 
@@ -119,41 +148,21 @@ impl Sets {
 ///
 /// `density` is the percentage chance (0-100) that a cell is *not*
 /// considered for an over/under crossing, and `add_a_loop` turns one
-/// crossing into a plain four-way junction. Draws from `rng` exactly as the
-/// Python version does, so the same seed gives the same maze.
+/// crossing into a plain four-way junction. The same seed gives the same
+/// maze.
 ///
 /// # Panics
 ///
 /// If `width` or `height` is zero.
-pub fn create_maze(width: usize, height: usize, density: i64, add_a_loop: bool, rng: &mut PyRandom) -> Grid {
+pub fn create_maze(width: usize, height: usize, density: i64, add_a_loop: bool, rng: &mut Rng) -> Grid {
     // structures to hold the maze
     let mut grid = Grid::new(width, height);
     let mut sets = Sets::new(width, height);
 
-    // build the list of edges; each one joins a cell to its north or west
-    // neighbour
-    let mut edges: Vec<(usize, usize, u8)> = Vec::with_capacity(2 * width * height);
-    for y in 0..height {
-        for x in 0..width {
-            if y > 0 {
-                edges.push((x, y, N));
-            }
-            if x > 0 {
-                edges.push((x, y, W));
-            }
-        }
-    }
-
-    rng.shuffle(&mut edges);
-
-    // each cell has at most one N and one W edge
-    let edge_index = |x: usize, y: usize, d: u8| (y * width + x) * 2 + usize::from(d == W);
-    let mut removed = vec![false; width * height * 2];
-
     // build the over/under locations
     for cy in 1..height.saturating_sub(1) {
         for cx in 1..width.saturating_sub(1) {
-            if rng.randint(0, 99) < density {
+            if (rng.below(100) as i64) < density {
                 continue;
             }
 
@@ -169,51 +178,59 @@ pub fn create_maze(width: usize, height: usize, density: i64, add_a_loop: bool, 
             sets.connect(north, south);
             sets.connect(east, west);
 
-            grid[(cx, cy)] = if rng.randint(0, 1) == 0 { CROSS_EW } else { CROSS_NS };
+            grid[(cx, cy)] = if rng.coin() { CROSS_EW } else { CROSS_NS };
 
             grid[north] |= S;
             grid[west] |= E;
             grid[east] |= W;
             grid[south] |= N;
-
-            // the edges into the crossing are no longer available; they are
-            // dropped in one pass below, which keeps the order of the rest
-            removed[edge_index(cx, cy, N)] = true;
-            removed[edge_index(cx, cy, W)] = true;
-            removed[edge_index(east.0, east.1, W)] = true;
-            removed[edge_index(south.0, south.1, N)] = true;
         }
     }
 
-    edges.retain(|&(x, y, d)| !removed[edge_index(x, y, d)]);
+    // build the list of the remaining edges, i.e. those not touching a
+    // crossing; each one joins a cell to its north or west neighbour, and is
+    // packed into a u32 as `cell * 2 + is_west` (cells numbered row by row)
+    // so that shuffling and walking the list stays in cache for large mazes
+    let mut edges: Vec<u32> = Vec::with_capacity(2 * width * height);
+    for (y, row) in grid.rows().enumerate() {
+        for (x, &cell) in row.iter().enumerate() {
+            if is_crossing(cell) {
+                continue;
+            }
+            let id = ((y * width + x) * 2) as u32;
+            if y > 0 && !is_crossing(grid[(x, y - 1)]) {
+                edges.push(id);
+            }
+            if x > 0 && !is_crossing(row[x - 1]) {
+                edges.push(id + 1);
+            }
+        }
+    }
+
+    rng.shuffle(&mut edges);
 
     // Kruskal's algorithm
-    while let Some((x, y, direction)) = edges.pop() {
-        let (neighbour, back) = match direction {
-            N => ((x, y - 1), S),
-            W => ((x - 1, y), E),
-            _ => unreachable!("edges only point north or west"),
-        };
+    for e in edges {
+        let cell = e / 2;
+        let (direction, neighbour, back) = if e & 1 == 0 { (N, cell - width as u32, S) } else { (W, cell - 1, E) };
 
-        if !sets.connected((x, y), neighbour) {
-            sets.connect((x, y), neighbour);
-            grid[(x, y)] |= direction;
-            grid[neighbour] |= back;
+        if sets.join(cell, neighbour) {
+            grid.cells[cell as usize] |= direction;
+            grid.cells[neighbour as usize] |= back;
         }
     }
 
     // add in a loop, I just replace a under/over with a cross
     if add_a_loop {
         // find all the crossings, if any
-        let mut candidates: Vec<(usize, usize)> = (1..height.saturating_sub(1))
+        let candidates: Vec<(usize, usize)> = (1..height.saturating_sub(1))
             .flat_map(|cy| (1..width.saturating_sub(1)).map(move |cx| (cx, cy)))
             .filter(|&cell| is_crossing(grid[cell]))
             .collect();
 
         // change just one of them to a crossing, e.g. create a loop
         if !candidates.is_empty() {
-            rng.shuffle(&mut candidates);
-            grid[candidates[0]] = N | S | W | E;
+            grid[candidates[rng.below(candidates.len() as u64) as usize]] = N | S | W | E;
         }
     }
 

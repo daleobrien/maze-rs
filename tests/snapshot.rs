@@ -2,7 +2,7 @@
 //! work can't change a single byte of what the generator produces without
 //! the hashes here being updated on purpose.
 
-use maze::random::PyRandom;
+use maze::random::Rng;
 use maze::renderers::pdf::{pdf_content, PdfOptions};
 use maze::renderers::svg::svg_render;
 use maze::renderers::text::text_render;
@@ -17,7 +17,7 @@ fn sha(bytes: &[u8]) -> String {
 /// Hash of every output for one maze: text, SVG (curved, straight and
 /// solved) and the PDF content stream and tile forms.
 fn outputs(id: &str, width: usize, height: usize, density: i64, add_a_loop: bool) -> String {
-    let mut rng = PyRandom::from_str_seed(id);
+    let mut rng = Rng::from_str_seed(id);
     let grid = create_maze(width, height, density, add_a_loop, &mut rng);
     let solution = find_solution(&grid);
 
@@ -47,15 +47,15 @@ fn outputs_are_unchanged() {
 }
 
 const CASES: &[(&str, usize, usize, i64, bool, &str)] = &[
-    ("abc", 10, 8, 50, false, "fd0c1a58abd3a04d46a4b132501ab394268c24b5f8c421452144e7805abf4c55"),
-    ("my-maze", 23, 30, 50, false, "ec171a34472d92db4ea926c6128a44a92d66864e6d4eb41a04098d79d48c881e"),
-    ("loop", 23, 30, 50, true, "596006e745e52d9dbf7483e456b792a106d9153522dcdbac9e321d10d8d78e69"),
-    ("dense", 40, 40, 10, false, "b34126174a2305d7e95e22b4ed2e96c880237bda0287b6421620c3036896dc85"),
-    ("sparse", 40, 40, 90, true, "5f75ff5cb7d44c5c0cb648bc5790bcb77636f0e0e50dd0271b2f0a21faf451d7"),
-    ("big", 120, 84, 50, false, "e797e308bbd0b41ec523c3e99a22375a34fa17b78b4e2dedcbeaf7fd8be4dcad"),
-    ("tall", 3, 60, 50, false, "97212ea2adbca7e102060191ef07c927d75dc1397d7e13cf8bdb9be6ab86d091"),
-    ("odd-bands", 97, 61, 30, true, "4da4d703b872bc28a6a88c61d2e296940ed83e603bc736d9241363515d9bab07"),
-    ("wide", 250, 20, 50, false, "58770d3a20e0d209165174710203b9e34cd3597933e58b6ffd4b5131c64ad80d"),
-    ("readme-big", 168, 240, 50, true, "c75b6dbe4a87aec11d1e89212c9592d005502e31d80d20f0dcf7df15423115f1"),
+    ("abc", 10, 8, 50, false, "545cc80144fce91de92456628dd8f95cae7adb5b2145f5a5ec01ca56f1371553"),
+    ("my-maze", 23, 30, 50, false, "959c47ff7f7ef2d324d45cb284ceca57ae80d368eeb4ac4c31c1fae7b97a3244"),
+    ("loop", 23, 30, 50, true, "8fe85c9e4cea9e395c89c87bc2a066b109237c2f53d53e932a3c7b12232b2258"),
+    ("dense", 40, 40, 10, false, "daa13855fd16480043a49d4f8ba0fe7206f554ca7789538f0f43f6081b81cb98"),
+    ("sparse", 40, 40, 90, true, "b9346214a99f65f9a8a5fe66a1f3b236595164d07746830e751fe91a5325681a"),
+    ("big", 120, 84, 50, false, "e68e46a07ab79ec8cf3244a3fe0f667f58e59ed2ebb43aed9ed606124d204187"),
+    ("tall", 3, 60, 50, false, "890562ab92edcb1a52f8bebe01f2a8ee0200da8d1379168f9e7906ec00056f84"),
+    ("odd-bands", 97, 61, 30, true, "40cb0da9b6e8699e798f391b77d7120059b691f6d021c03fd0fd7bc4225c479d"),
+    ("wide", 250, 20, 50, false, "234fc42c8cce1009bb565eccca21e03c500586a67523140f2794a52b750130a9"),
+    ("readme-big", 168, 240, 50, true, "37bc4898c4efdca9cbffbb1cc5aa6c984f30487c0b0e83ffdbd845d7d3ffb916"),
     ("one", 1, 1, 50, false, "ca45f9dda459f8fe26575271a93592bcbc5576bf25a2337feea2be7cf4aaecf5"),
 ];
