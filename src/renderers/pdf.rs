@@ -1,8 +1,11 @@
 //! PDF output. The Python version draws with ReportLab; this module writes
-//! the PDF directly but emits the same page drawing operators ReportLab
+//! the PDF directly, drawing each tile with the same operators ReportLab
 //! would (including its number formatting and Bezier arc approximation).
+//! Each kind of tile is written once as a Form XObject and drawn in its
+//! cells with `Do`.
 
 use std::f64::consts::PI;
+use std::fmt::Write as _;
 use std::io::Write;
 use std::ops::Range;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -512,77 +515,6 @@ impl Tiles {
     }
 }
 
-/// The `cm` transforms that move to each cell, written once per column and
-/// row rather than once per cell.
-///
-/// ReportLab moves to a cell with `translate(x, y)` and back with
-/// `translate(-x, -y)`, and folds each move into the transform before it,
-/// re-reading that one's (already formatted) values. So a cell's transform is
-/// `1 0 0 1 x' y' cm`, where `x'` is its `x` plus the written `-x` of the cell
-/// before, and likewise for `y'`: it depends only on the two cells' columns
-/// and the two cells' rows.
-struct Placement {
-    /// The `x'` of each column; the first column's follows the last column
-    /// of the row above.
-    x: Vec<String>,
-    /// The `y'` of each row when the cell before is in the same row...
-    y_along: Vec<String>,
-    /// ...and when it is at the end of the row above.
-    y_down: Vec<String>,
-    /// The move to the first cell, which follows no other move.
-    first: String,
-    /// The move back from the last cell, which nothing follows.
-    last: String,
-}
-
-impl Placement {
-    fn new(xs: &[f64], ys: &[f64]) -> Self {
-        // the written value of each move back
-        let back = |xs: &[f64]| -> Vec<f64> { xs.iter().map(|&x| push_fp_num(&mut String::new(), -x)).collect() };
-        let (back_x, back_y) = (back(xs), back(ys));
-
-        // ReportLab's `a0 * dx + c0 * dy + e0` (and likewise for y), where the
-        // folded transform's `a0` is 1 and `c0` is 0; the maze sits inside the
-        // margins, so the other offset is positive and `0 * dy` adds nothing
-        let fold = |d: f64, e0: f64| {
-            let mut out = String::new();
-            push_fp_num(&mut out, d + e0);
-            out
-        };
-        let columns = xs.len();
-        let x = (0..columns).map(|i| fold(xs[i], back_x[(i + columns - 1) % columns])).collect();
-        let y_along = (0..ys.len()).map(|j| fold(ys[j], back_y[j])).collect();
-        let y_down = (0..ys.len()).map(|j| if j == 0 { String::new() } else { fold(ys[j], back_y[j - 1]) }).collect();
-
-        let cm = |x: f64, y: f64| {
-            let mut out = String::from("1 0 0 1 ");
-            push_fp_num(&mut out, x);
-            out.push(' ');
-            push_fp_num(&mut out, y);
-            out.push_str(" cm");
-            out
-        };
-        let first = cm(xs[0], ys[0]);
-        let last = cm(-xs[columns - 1], -ys[ys.len() - 1]);
-        Placement { x, y_along, y_down, first, last }
-    }
-
-    /// Append the move to cell `(i, j)`, folded into the move back from the
-    /// cell before it.
-    fn push_move(&self, c: &mut Canvas, i: usize, j: usize) {
-        if (i, j) == (0, 0) {
-            c.push_op(&self.first);
-            return;
-        }
-        let y = if i == 0 { &self.y_down[j] } else { &self.y_along[j] };
-        c.push_op("1 0 0 1 ");
-        c.code.push_str(&self.x[i]);
-        c.code.push(' ');
-        c.code.push_str(y);
-        c.code.push_str(" cm");
-    }
-}
-
 pub struct PdfOptions {
     pub draw_with_curves: bool,
     pub page: PageSize,
@@ -594,6 +526,18 @@ pub struct PageContent {
     pub stream: String,
     pub width: f64,
     pub height: f64,
+    /// The side of a cell, in points.
+    pub tile_size: f64,
+    /// The tiles the page draws with `Do`, each a Form XObject named `/T`
+    /// and its cell kind, e.g. `/T5`.
+    pub forms: Vec<TileForm>,
+}
+
+/// The uncompressed content stream of one kind of tile, drawn in the tile's
+/// own coordinates.
+pub struct TileForm {
+    pub cell: u8,
+    pub stream: String,
 }
 
 /// The uncompressed page content stream.
@@ -628,29 +572,53 @@ pub fn pdf_content(grid: &Grid, options: &PdfOptions) -> PageContent {
     top_margin -= (s * height as f64 - (page_height - 2.0 * top_margin)) / 2.0;
 
     c.set_line_width(s / 7.0);
+    c.push_op("0 0 0 RG");
 
     let tiles = Tiles::new(s, options.draw_with_curves);
 
-    // a tile is drawn relative to its own cell, so every cell of the same
-    // kind has the same path
-    let tile_code: Vec<String> = (0..32).map(|cell| tiles.path(cell, false, false).code).collect();
+    // the start and end cells are marked, and their walls drawn in place
+    let is_marked = |i: usize, j: usize| (i == 0 && j == height - 1, i == org_width - 1 && j == 0);
 
-    let xs: Vec<f64> = (0..org_width).map(|i| left_margin + i as f64 * s).collect();
-    let ys: Vec<f64> = (0..height).map(|j| top_margin + j as f64 * s).collect();
-    let placement = Placement::new(&xs, &ys);
+    // a tile is drawn relative to its own cell, so every cell of the same
+    // kind has the same path: it is written once, as a Form XObject, and each
+    // cell of that kind moves there and draws it with `Do`
+    let mut used = [false; 32];
+    for j in 0..height {
+        for (i, &cell) in grid.row(j).iter().enumerate() {
+            used[usize::from(cell)] |= is_marked(i, j) == (false, false);
+        }
+    }
+    let forms: Vec<TileForm> = (0..32u8)
+        .filter(|&cell| used[usize::from(cell)])
+        .map(|cell| TileForm { cell, stream: tiles.path(cell, false, false).code + "\nS" })
+        .collect();
+
+    // each row moves to its first cell, and from there along the row one
+    // cell at a time, so every cell of a kind after the first in a row is
+    // drawn with the same operators
+    let mut step = String::from("\n1 0 0 1 ");
+    push_fp_num(&mut step, s);
+    step.push_str(" 0 cm");
+    let draw_form: Vec<String> = (0..32).map(|cell| format!("\n/T{cell} Do")).collect();
+    let step_and_draw: Vec<String> = draw_form.iter().map(|draw| format!("{step} {}", &draw[1..])).collect();
 
     let draw_rows = |c: &mut Canvas, rows: Range<usize>| {
         for j in rows {
+            c.push_op("q 1 0 0 1 ");
+            push_fp_num(&mut c.code, left_margin);
+            c.code.push(' ');
+            push_fp_num(&mut c.code, top_margin + j as f64 * s);
+            c.code.push_str(" cm");
+
             // upper/lower rows
             for (i, &cell) in grid.row(j).iter().enumerate() {
-                placement.push_move(c, i, j);
-                c.push_op("0 0 0 RG");
-
                 // mark start and end
-                let start = i == 0 && j == height - 1;
-                let end = i == org_width - 1 && j == 0;
+                let (start, end) = is_marked(i, j);
 
                 if start || end {
+                    if i > 0 {
+                        c.code.push_str(&step);
+                    }
                     c.set_stroke_rgb(0.9, 0.1, 0.1);
                     c.set_fill_rgb(0.9, 0.1, 0.1);
                     let mut p = Path::new();
@@ -658,35 +626,36 @@ pub fn pdf_content(grid: &Grid, options: &PdfOptions) -> PageContent {
                     c.draw_path(&p, true);
 
                     c.draw_path(&tiles.path(cell, start, end), false);
+                    c.push_op("0 0 0 RG");
+                } else if i > 0 {
+                    c.code.push_str(&step_and_draw[usize::from(cell)]);
                 } else {
-                    c.draw_path_code(&tile_code[usize::from(cell)], false);
+                    c.code.push_str(&draw_form[usize::from(cell)]);
                 }
             }
+            c.push_op("Q");
         }
     };
 
-    // bands of rows are drawn in parallel; each cell's move back is folded
-    // into the next cell's move, so only the last one is written
+    // bands of rows are drawn in parallel
     let bands = map_bands(height, org_width, |rows| {
-        // a cell takes its tile, the operators around it and its move
-        let size = rows.clone().flat_map(|j| grid.row(j)).map(|&cell| tile_code[usize::from(cell)].len() + 64).sum();
-        let mut c = Canvas { code: String::with_capacity(size) };
+        // a cell takes its move and its `Do`, and a row its own move
+        let mut c = Canvas { code: String::with_capacity(rows.len() * (org_width * 32 + 64)) };
         draw_rows(&mut c, rows);
         c.code
     });
-    c.code.reserve(bands.iter().map(String::len).sum::<usize>() + placement.last.len() + 4);
+    c.code.reserve(bands.iter().map(String::len).sum::<usize>() + 4);
     for band in bands {
         c.code.push_str(&band);
     }
-    c.push_op(&placement.last);
 
     let mut stream = c.code;
     stream.push_str("\n \n");
-    PageContent { stream, width: page_width, height: page_height }
+    PageContent { stream, width: page_width, height: page_height, tile_size: s, forms }
 }
 
 /// Below this a content stream is compressed on one thread.
-const PARALLEL_COMPRESS_MIN_BYTES: usize = 1 << 20;
+const PARALLEL_COMPRESS_MIN_BYTES: usize = 1 << 17;
 
 /// Compress `data` into a zlib stream.
 ///
@@ -794,8 +763,22 @@ pub fn pdf_render(grid: &Grid, options: &PdfOptions) -> Vec<u8> {
 
     let date = pdf_date();
     let media_box = fp_str(&[0.0, 0.0, content.width, content.height]);
+    // the tile forms follow the page's own objects, from object 8
+    let s = content.tile_size;
+    let bbox = fp_str(&[-s, -s, 2.0 * s, 2.0 * s]);
+    let mut x_objects = String::new();
+    let mut forms = Vec::with_capacity(content.forms.len());
+    for (k, form) in content.forms.iter().enumerate() {
+        write!(x_objects, " /T{} {} 0 R", form.cell, k + 8).expect("writing to a String cannot fail");
+        // a tile is a few hundred bytes, too few for compressing to pay
+        forms.push(format!(
+            "<<\n/BBox [ {bbox} ] /FormType 1 /Length {} /Matrix [ 1 0 0 1 0 0 ] /Resources <<\n\n>> /Subtype /Form /Type /XObject\n>>\nstream\n{}\nendstream",
+            form.stream.len(),
+            form.stream
+        ));
+    }
     let page = format!(
-        "<<\n/Contents 7 0 R /MediaBox [ {media_box} ] /Parent 6 0 R /Resources <<\n/Font 1 0 R /ProcSet [ /PDF /Text /ImageB /ImageC /ImageI ]\n>> /Rotate 0 /Type /Page\n>>"
+        "<<\n/Contents 7 0 R /MediaBox [ {media_box} ] /Parent 6 0 R /Resources <<\n/Font 1 0 R /ProcSet [ /PDF /Text /ImageB /ImageC /ImageI ] /XObject <<{x_objects}\n>>\n>> /Rotate 0 /Type /Page\n>>"
     );
     let info = format!(
         "<<\n/Author (Dale O'Brien) /CreationDate ({date}) /Creator (maze-rs) /Keywords () /ModDate ({date}) /Producer (maze-rs) /Subject () /Title (Maze) /Trapped /False\n>>"
@@ -806,7 +789,7 @@ pub fn pdf_render(grid: &Grid, options: &PdfOptions) -> Vec<u8> {
         b"\nendstream",
     ]
     .concat();
-    let objects: [&[u8]; 7] = [
+    let mut objects: Vec<&[u8]> = vec![
         b"<<\n/F1 2 0 R\n>>",
         b"<<\n/BaseFont /Helvetica /Encoding /WinAnsiEncoding /Name /F1 /Subtype /Type1 /Type /Font\n>>",
         page.as_bytes(),
@@ -815,6 +798,7 @@ pub fn pdf_render(grid: &Grid, options: &PdfOptions) -> Vec<u8> {
         b"<<\n/Count 1 /Kids [ 3 0 R ] /Type /Pages\n>>",
         &contents,
     ];
+    objects.extend(forms.iter().map(String::as_bytes));
 
     let mut out: Vec<u8> = b"%PDF-1.3\n%\x93\x8c\x8b\x9e maze-rs generated PDF document\n".to_vec();
     let mut offsets = Vec::with_capacity(objects.len());
