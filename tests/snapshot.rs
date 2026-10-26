@@ -1,12 +1,12 @@
 //! Locks the generated output for a set of fixed maze ids, so performance
 //! work can't change a single byte of what the generator produces.
 
-use maze::maze::{create_maze, find_solution};
 use maze::random::PyRandom;
 use maze::renderers::pdf::{pdf_content, PdfOptions};
 use maze::renderers::svg::svg_render;
 use maze::renderers::text::text_render;
 use maze::renderers::PageSize;
+use maze::{create_maze, find_solution};
 use sha2::{Digest, Sha256};
 
 fn sha(bytes: &[u8]) -> String {
@@ -23,11 +23,11 @@ fn outputs(id: &str, width: usize, height: usize, density: i64, add_a_loop: bool
     let mut all = Vec::new();
     all.extend_from_slice(text_render(&grid).as_bytes());
     for curves in [true, false] {
-        all.extend_from_slice(svg_render(&grid, width, height, PageSize::A4, curves, None).as_bytes());
-        all.extend_from_slice(svg_render(&grid, width, height, PageSize::A4, curves, solution.as_deref()).as_bytes());
+        all.extend_from_slice(svg_render(&grid, PageSize::A4, curves, None).as_bytes());
+        all.extend_from_slice(svg_render(&grid, PageSize::A4, curves, solution.as_deref()).as_bytes());
         for landscape in [false, true] {
-            let options = PdfOptions { draw_with_curves: curves, page: PageSize::A4, landscape, width, height };
-            all.extend_from_slice(pdf_content(&grid, &options).0.as_bytes());
+            let options = PdfOptions { draw_with_curves: curves, page: PageSize::A4, landscape };
+            all.extend_from_slice(pdf_content(&grid, &options).stream.as_bytes());
         }
     }
     sha(&all)

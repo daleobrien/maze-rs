@@ -2,12 +2,12 @@
 //! three renderers. Run with `cargo bench`.
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use maze::maze::{create_maze, find_solution, Grid};
 use maze::random::PyRandom;
 use maze::renderers::pdf::{pdf_render, PdfOptions};
 use maze::renderers::svg::svg_render;
 use maze::renderers::text::text_render;
 use maze::renderers::PageSize;
+use maze::{create_maze, find_solution, Grid};
 
 // (width, height): the default size, a large A0 maze and the README's big one
 const SIZES: &[(usize, usize)] = &[(23, 30), (120, 84), (168, 240)];
@@ -28,7 +28,7 @@ fn bench_create(c: &mut Criterion) {
     let mut group = c.benchmark_group("create_maze");
     for &(w, h) in SIZES {
         group.bench_with_input(BenchmarkId::from_parameter(label(w, h)), &(w, h), |b, &(w, h)| {
-            b.iter(|| grid(w, h))
+            b.iter(|| grid(w, h));
         });
     }
     group.finish();
@@ -51,12 +51,12 @@ fn bench_render(c: &mut Criterion) {
         let solution = find_solution(&g);
         group.bench_function(format!("text/{}", label(w, h)), |b| b.iter(|| text_render(black_box(&g))));
         group.bench_function(format!("svg/{}", label(w, h)), |b| {
-            b.iter(|| svg_render(black_box(&g), w, h, PageSize::A4, true, None))
+            b.iter(|| svg_render(black_box(&g), PageSize::A4, true, None));
         });
         group.bench_function(format!("svg_solved/{}", label(w, h)), |b| {
-            b.iter(|| svg_render(black_box(&g), w, h, PageSize::A4, true, solution.as_deref()))
+            b.iter(|| svg_render(black_box(&g), PageSize::A4, true, solution.as_deref()));
         });
-        let options = PdfOptions { draw_with_curves: true, page: PageSize::A4, landscape: false, width: w, height: h };
+        let options = PdfOptions { draw_with_curves: true, page: PageSize::A4, landscape: false };
         group.bench_function(format!("pdf/{}", label(w, h)), |b| b.iter(|| pdf_render(black_box(&g), &options)));
     }
     group.finish();

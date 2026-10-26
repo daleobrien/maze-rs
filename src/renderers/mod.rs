@@ -1,4 +1,5 @@
 use std::fmt::Write as _;
+use std::num::NonZeroUsize;
 use std::ops::Range;
 
 pub mod pdf;
@@ -13,6 +14,7 @@ pub enum PageSize {
 }
 
 /// Page size in points (portrait).
+#[must_use]
 pub fn page_size(page: PageSize) -> (f64, f64) {
     let dpi = 72.0;
     match page {
@@ -25,6 +27,7 @@ pub fn page_size(page: PageSize) -> (f64, f64) {
 
 /// Format a float the way Python's `str(float)` does for the magnitudes used
 /// here (shortest round-trip digits, always with a decimal point).
+#[must_use]
 pub fn py_float_repr(x: f64) -> String {
     if x.is_finite() && x.fract() == 0.0 && x.abs() < 1e16 {
         format!("{x:.1}")
@@ -33,26 +36,58 @@ pub fn py_float_repr(x: f64) -> String {
     }
 }
 
-/// Mazes with fewer cells than this are rendered on one thread; below it
-/// starting threads costs more than it saves.
-const PARALLEL_MIN_CELLS: usize = 4096;
+/// Below this much work (items times cost per item) starting threads costs
+/// more than it saves.
+const PARALLEL_MIN_WORK: usize = 4096;
 
-/// Split `rows` rows into consecutive bands, run `f` on each (in parallel
-/// when the maze is large enough) and return the results in row order.
-pub(crate) fn map_row_bands<T: Send>(rows: usize, cols: usize, f: impl Fn(Range<usize>) -> T + Sync) -> Vec<T> {
-    let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
-    if threads == 1 || rows * cols < PARALLEL_MIN_CELLS {
-        return vec![f(0..rows)];
+/// Split `0..len` into consecutive bands, run `f` on each (in parallel when
+/// there is enough work) and return the results in order.
+pub(crate) fn map_bands<T: Send>(len: usize, cost_per_item: usize, f: impl Fn(Range<usize>) -> T + Sync) -> Vec<T> {
+    let threads = std::thread::available_parallelism().map_or(1, NonZeroUsize::get);
+    if threads == 1 || len * cost_per_item < PARALLEL_MIN_WORK {
+        return vec![f(0..len)];
     }
-    let bands = threads.min(rows);
-    let band = |k: usize| k * rows / bands..(k + 1) * rows / bands;
+    let bands = threads.min(len);
+    let band = |k: usize| k * len / bands..(k + 1) * len / bands;
     std::thread::scope(|scope| {
         let f = &f;
         let handles: Vec<_> = (1..bands).map(|k| scope.spawn(move || f(band(k)))).collect();
         let mut results = vec![f(band(0))];
-        results.extend(handles.into_iter().map(|h| h.join().unwrap()));
+        results.extend(handles.into_iter().map(|h| h.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic))));
         results
     })
+}
+
+/// The measurements of a tile with sides `s`, shared by the SVG and PDF
+/// renderers and named as in the Python version: `g` is the gap between a
+/// wall and the cell's edge, and the rest place the three arcs that make a
+/// dead end's rounded cap.
+pub(crate) struct Geometry {
+    pub s: f64,
+    pub g: f64,
+    pub n: f64,
+    pub r: f64,
+    pub q: f64,
+    pub v: f64,
+    /// In radians.
+    pub theta: f64,
+}
+
+impl Geometry {
+    pub fn new(s: f64) -> Self {
+        let g = s * 0.2;
+        let k = 0.5;
+
+        let n = -(g / k) + 0.5 * (s - ((g * (4.0 * g - 3.0 * g * k + 2.0 * k * s)) / k).sqrt());
+
+        let r = g / k;
+        let q = n + r;
+        let v = (g * (-1.0 + k)) / k;
+
+        let theta = ((2.0 * g - 2.0 * g * k + k * s) / (2.0 * g - g * k + k * s)).asin();
+
+        Geometry { s, g, n, r, q, v, theta }
+    }
 }
 
 /// Append `x` with `digits` decimal places, exactly as `format!("{x:.digits$}")`
@@ -92,7 +127,7 @@ fn push_fixed_impl(out: &mut String, x: f64, digits: usize, trim: bool) -> f64 {
         // |x| < 1e9, so the shift can't overflow
         scaled << exponent
     } else {
-        let shift = (-exponent) as u32;
+        let shift = exponent.unsigned_abs();
         if shift >= 128 {
             0
         } else {
@@ -139,8 +174,7 @@ fn push_fixed_impl(out: &mut String, x: f64, digits: usize, trim: bool) -> f64 {
         pos -= 1;
         buf[pos] = b'-';
     }
-    // only ASCII digits, '.' and '-' were written
-    out.push_str(std::str::from_utf8(&buf[pos..]).unwrap());
+    out.push_str(std::str::from_utf8(&buf[pos..]).expect("only ASCII was written"));
 
     // q and unit are exact, so this division rounds the decimal just like
     // parsing it would
@@ -154,7 +188,7 @@ fn push_fixed_impl(out: &mut String, x: f64, digits: usize, trim: bool) -> f64 {
 
 fn push_fixed_slow(out: &mut String, x: f64, digits: usize, trim: bool) -> f64 {
     let start = out.len();
-    write!(out, "{x:.digits$}").unwrap();
+    write!(out, "{x:.digits$}").expect("writing to a String cannot fail");
     if trim && out[start..].contains('.') {
         while out.ends_with('0') {
             out.pop();
@@ -187,7 +221,28 @@ mod tests {
 
     #[test]
     fn fixed_matches_std_format() {
-        let specials = [0.0, -0.0, 0.5, 1.5, 2.5, -2.5, 0.125, 0.375, 1.005, 2.675, 0.045, 1e-7, 5e-7, 1e-300, 5e-324, 123456.5, 9.995, 99.995, 597.6, -27.028571428571];
+        let specials = [
+            0.0,
+            -0.0,
+            0.5,
+            1.5,
+            2.5,
+            -2.5,
+            0.125,
+            0.375,
+            1.005,
+            2.675,
+            0.045,
+            1e-7,
+            5e-7,
+            1e-300,
+            5e-324,
+            123456.5,
+            9.995,
+            99.995,
+            597.6,
+            -27.028571428571,
+        ];
         for x in specials {
             check_fixed(x);
         }

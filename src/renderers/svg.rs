@@ -1,10 +1,11 @@
+//! SVG output, byte for byte what the Python version writes.
+
 use std::f64::consts::PI;
 use std::fmt::Write as _;
-
-use crate::maze::{Grid, CROSS_EW, CROSS_NS};
 use std::ops::Range;
 
-use crate::renderers::{map_row_bands, page_size, push_fixed_trimmed, py_float_repr, PageSize};
+use crate::maze::{Grid, CROSS_EW, CROSS_NS};
+use crate::renderers::{map_bands, page_size, push_fixed_trimmed, py_float_repr, Geometry, PageSize};
 
 const QUARTER: f64 = PI / 2.0;
 const HALF: f64 = PI;
@@ -17,19 +18,13 @@ fn push_round(out: &mut String, x: f64) {
     push_fixed_trimmed(out, x, 2);
 }
 
-/// Round to two decimals and strip trailing zeros after the decimal point.
-fn round(x: f64) -> String {
-    let mut s = String::new();
-    push_round(&mut s, x);
-    s
-}
-
+/// The side of a cell the solution enters or leaves it by.
 #[derive(Clone, Copy, PartialEq)]
-enum Dir {
-    T,
-    L,
-    R,
-    B,
+enum Side {
+    Top,
+    Left,
+    Right,
+    Bottom,
 }
 
 struct SvgPath {
@@ -60,18 +55,15 @@ struct SvgPath {
 }
 
 impl SvgPath {
-    fn new(colour: &'static str, stroke_width: u32, opacity: &'static str, s: f64, draw_with_curves: bool, faint: bool) -> Self {
-        let g = s * 0.2;
-        let k = 0.5;
-
-        let n = -(g / k) + 0.5 * (s - ((g * (4.0 * g - 3.0 * g * k + 2.0 * k * s)) / k).sqrt());
-
-        let r = g / k;
-        let q = n + r;
-        let v = (g * (-1.0 + k)) / k;
-
-        let theta = ((2.0 * g - 2.0 * g * k + k * s) / (2.0 * g - g * k + k * s)).asin();
-
+    fn new(
+        colour: &'static str,
+        stroke_width: u32,
+        opacity: &'static str,
+        s: f64,
+        draw_with_curves: bool,
+        faint: bool,
+    ) -> Self {
+        let Geometry { s, g, n, r, q, v, theta } = Geometry::new(s);
         let delta = theta - PI / 2.0;
 
         SvgPath {
@@ -109,17 +101,18 @@ impl SvgPath {
             r#"<path stroke-opacity="{}" stroke-width="{}" stroke="{}" d="{}" /> {}"#,
             self.opacity, self.stroke_width, self.colour, self.svg, self.dots
         )
-        .unwrap();
+        .expect("writing to a String cannot fail");
     }
 
     fn dot(&mut self, x: f64, y: f64) {
-        let a = round(x + self.s2);
-        let b = round(y + self.s2);
-        let r = round(self.s / 3.0);
-
-        self.dots += &format!(
-            r##"<circle cx="{a}" cy="{b}" r="{r}" fill-opacity="1.0" stroke-opacity="0" fill="#E51919" />"##
-        );
+        let out = &mut self.dots;
+        out.push_str(r#"<circle cx=""#);
+        push_round(out, x + self.s2);
+        out.push_str(r#"" cy=""#);
+        push_round(out, y + self.s2);
+        out.push_str(r#"" r=""#);
+        push_round(out, self.s / 3.0);
+        out.push_str(r##"" fill-opacity="1.0" stroke-opacity="0" fill="#E51919" />"##);
     }
 
     fn polar(x: f64, y: f64, radius: f64, angle: f64) -> (f64, f64) {
@@ -154,7 +147,7 @@ impl SvgPath {
         let r_end = out.len();
         out.push(' ');
         out.extend_from_within(r_start..r_end);
-        write!(out, " 0 {large} {dir} ").unwrap();
+        write!(out, " 0 {large} {dir} ").expect("writing to a String cannot fail");
         push_round(out, c);
         out.push(' ');
         push_round(out, d);
@@ -201,65 +194,67 @@ impl SvgPath {
 
     // ---- solution trace ----
 
-    fn direction(dx: isize, dy: isize) -> Dir {
-        if dx == 0 {
-            return if dy < 0 { Dir::B } else { Dir::T };
-        }
-        if dx < 0 {
-            Dir::R
-        } else {
-            Dir::L
+    /// The side of a cell that a step of `(dx, dy)` into it comes in by.
+    fn side(dx: isize, dy: isize) -> Side {
+        match (dx, dy) {
+            (0, dy) if dy < 0 => Side::Bottom,
+            (0, _) => Side::Top,
+            (dx, _) if dx < 0 => Side::Right,
+            _ => Side::Left,
         }
     }
 
-    fn trace_tile(&mut self, from: Dir, to: Dir, x: f64, y: f64) {
-        use Dir::*;
+    fn trace_tile(&mut self, from: Side, to: Side, x: f64, y: f64) {
+        use Side::{Bottom, Left, Right, Top};
         match (from, to) {
-            (T, L) | (L, T) => self.t9(x, y),
-            (T, R) | (R, T) => self.t5(x, y),
-            (T, B) | (B, T) => self.t3(x, y),
-            (L, R) | (R, L) => self.tc(x, y),
-            (L, B) | (B, L) => self.ta(x, y),
-            (R, B) | (B, R) => self.t6(x, y),
+            (Top, Left) | (Left, Top) => self.t9(x, y),
+            (Top, Right) | (Right, Top) => self.t5(x, y),
+            (Top, Bottom) | (Bottom, Top) => self.t3(x, y),
+            (Left, Right) | (Right, Left) => self.tc(x, y),
+            (Left, Bottom) | (Bottom, Left) => self.ta(x, y),
+            (Right, Bottom) | (Bottom, Right) => self.t6(x, y),
             _ => panic!("solution doubles back on itself"),
         }
     }
 
     fn render_trace(&mut self, grid: &Grid, trail: &[(isize, isize)]) {
         let s = self.s;
-        let count = trail.windows(3).count();
+        let to_page = |(x, y): (isize, isize)| (x as f64 * s, y as f64 * s);
+        let count = trail.len().saturating_sub(2);
         for (i, w) in trail.windows(3).enumerate() {
-            let (prev, curr, head) = (w[0], w[1], w[2]);
+            let &[prev, curr, head] = w else { unreachable!("windows of 3") };
 
-            let from_d = Self::direction(curr.0 - prev.0, curr.1 - prev.1);
-            let to_d = Self::direction(curr.0 - head.0, curr.1 - head.1);
-            let (cx, cy) = (curr.0 as f64 * s, curr.1 as f64 * s);
+            let from = Self::side(curr.0 - prev.0, curr.1 - prev.1);
+            let to = Self::side(curr.0 - head.0, curr.1 - head.1);
+            let (cx, cy) = to_page(curr);
 
             if i == 0 {
-                if from_d == Dir::T {
-                    self.t2(prev.0 as f64 * s, prev.1 as f64 * s);
-                } else if from_d == Dir::L {
-                    self.t4(prev.0 as f64 * s, prev.1 as f64 * s);
+                let (x, y) = to_page(prev);
+                match from {
+                    Side::Top => self.t2(x, y),
+                    Side::Left => self.t4(x, y),
+                    _ => {}
                 }
             }
             if i + 1 == count {
-                if to_d == Dir::R {
-                    self.t8(head.0 as f64 * s, head.1 as f64 * s);
-                }
-                if to_d == Dir::B {
-                    self.t1(head.0 as f64 * s, head.1 as f64 * s);
+                let (x, y) = to_page(head);
+                match to {
+                    Side::Right => self.t8(x, y),
+                    Side::Bottom => self.t1(x, y),
+                    _ => {}
                 }
             }
 
             if !self.faint {
-                self.trace_tile(from_d, to_d, cx, cy);
+                self.trace_tile(from, to, cx, cy);
             }
 
             // Python floor division
             let dx = (prev.0 - curr.0).div_euclid(2);
             let dy = (prev.1 - curr.1).div_euclid(2);
-            let (px, py) = ((dx + curr.0) as f64 * s, (dy + curr.1) as f64 * s);
-            let prev_tile = grid[(dy + curr.1) as usize][(dx + curr.0) as usize];
+            let between = (curr.0 + dx, curr.1 + dy);
+            let (px, py) = to_page(between);
+            let prev_tile = grid[(between.0 as usize, between.1 as usize)];
 
             if dx == 1 || dx == -1 {
                 if prev_tile == CROSS_NS {
@@ -385,16 +380,15 @@ impl SvgPath {
 
     /// Draw the walls of the given rows of the maze.
     fn render_walls(&mut self, grid: &Grid, rows: Range<usize>) {
-        let left_margin = 0.0;
-        let top_margin = 0.0;
+        let (last_x, last_y) = (grid.width() - 1, grid.height() - 1);
 
-        for (j, row) in grid.iter().enumerate().take(rows.end).skip(rows.start) {
-            let y = top_margin + j as f64 * self.s;
+        for j in rows {
+            let y = j as f64 * self.s;
 
-            for (i, &cell) in row.iter().enumerate() {
-                let x = left_margin + i as f64 * self.s;
+            for (i, &cell) in grid.row(j).iter().enumerate() {
+                let x = i as f64 * self.s;
 
-                if (i == 0 && j == 0) || (i == row.len() - 1 && j == grid.len() - 1) {
+                if (i, j) == (0, 0) || (i, j) == (last_x, last_y) {
                     self.dot(x, y);
                 } else {
                     match cell {
@@ -722,18 +716,19 @@ impl SvgPath {
 
 /// Render the maze (and optionally its solution) as an SVG document,
 /// matching the Python output byte for byte.
-pub fn svg_render(grid: &Grid, width: usize, height: usize, page: PageSize, draw_with_curves: bool, solution: Option<&[(isize, isize)]>) -> String {
+#[must_use]
+pub fn svg_render(grid: &Grid, page: PageSize, draw_with_curves: bool, solution: Option<&[(isize, isize)]>) -> String {
     let (page_width, page_height) = page_size(page);
-    let left_margin = 0.0;
+    let height = grid.height() as f64;
 
     // cells must be square, it's the math!, I'm not doing it again.
     // so scale the width if the height will go over the page
-    let mut width = width as f64;
-    if (height as f64 / width) > (page_height / page_width) {
-        width = (page_width / page_height * height as f64).ceil();
+    let mut width = grid.width() as f64;
+    if (height / width) > (page_height / page_width) {
+        width = (page_width / page_height * height).ceil();
     }
 
-    let s = (page_width - 2.0 * left_margin) / width;
+    let s = page_width / width;
     let stroke_width = 2;
 
     let mut walls = SvgPath::new("#000000", stroke_width, "1.0", s, draw_with_curves, false); // Maze walls
@@ -741,7 +736,7 @@ pub fn svg_render(grid: &Grid, width: usize, height: usize, page: PageSize, draw
     let mut under_trace = SvgPath::new("#E51919", 5, "0.2", s, draw_with_curves, true); // faint solution lines
 
     // rows are independent, so bands of them are drawn in parallel and joined
-    let bands = map_row_bands(grid.len(), grid.first().map_or(0, |r| r.len()), |rows| {
+    let bands = map_bands(grid.height(), grid.width(), |rows| {
         let mut band = SvgPath::new("#000000", stroke_width, "1.0", s, draw_with_curves, false);
         band.render_walls(grid, rows);
         (band.svg, band.dots)
@@ -758,7 +753,7 @@ pub fn svg_render(grid: &Grid, width: usize, height: usize, page: PageSize, draw
     }
 
     let w = py_float_repr(width * s);
-    let h = py_float_repr(height as f64 * s);
+    let h = py_float_repr(height * s);
     let view_box = format!(r#"viewBox="0 0 {w} {h}" "#);
     let head = format!(
         r#"<svg id="maze" xmlns="http://www.w3.org/2000/svg" {view_box} width="{w}px" height="{h}px" stroke-width="{stroke_width}" fill-opacity="0.0" stroke="black">"#
@@ -770,12 +765,13 @@ pub fn svg_render(grid: &Grid, width: usize, height: usize, page: PageSize, draw
     if solution.is_some() {
         paths.extend([&over_trace, &under_trace]);
     }
-    let mut out = String::with_capacity(head.len() + paths.iter().map(|p| p.svg.len() + p.dots.len() + 100).sum::<usize>());
+    let mut out =
+        String::with_capacity(head.len() + paths.iter().map(|p| p.svg.len() + p.dots.len() + 100).sum::<usize>());
     out.push_str(&head);
     for p in paths {
         out.push(' ');
         p.write_path(&mut out);
     }
-    write!(out, " {dots} </svg>").unwrap();
+    write!(out, " {dots} </svg>").expect("writing to a String cannot fail");
     out
 }

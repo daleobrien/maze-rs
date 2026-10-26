@@ -1,25 +1,35 @@
-use std::process::exit;
+use std::io;
+use std::process::ExitCode;
 
-use maze::maze::{create_maze, find_solution};
 use maze::random::PyRandom;
 use maze::renderers::pdf::{pdf_render, PdfOptions};
 use maze::renderers::svg::svg_render;
 use maze::renderers::text::text_render;
 use maze::renderers::PageSize;
+use maze::{create_maze, find_solution};
 
 const DOC: &str = include_str!("usage.txt");
 
-#[derive(Clone, Copy, PartialEq)]
 enum Command {
-    Pdf,
+    Pdf { filename: String },
     Text,
-    Svg,
+    Svg { filename: String },
 }
 
+impl Command {
+    /// The options this command's usage line accepts.
+    fn allowed_options(&self) -> &'static [char] {
+        match self {
+            Command::Pdf { .. } => &['W', 'H', 'p', 'd', 'S', 'L', 'O', 'i'],
+            Command::Text => &['W', 'H', 'p', 'd', 'L', 'i'],
+            Command::Svg { .. } => &['W', 'H', 'p', 'd', 'S', 'L', 'i', 's'],
+        }
+    }
+}
+
+/// The options as given on the command line, before any are checked.
 #[derive(Default)]
-struct Args {
-    command: Option<Command>,
-    filename: Option<String>,
+struct Options {
     width: Option<String>,
     height: Option<String>,
     density: Option<String>,
@@ -31,99 +41,174 @@ struct Args {
     solution: Option<String>,
 }
 
-/// (short, long, takes a value)
-const OPTIONS: &[(char, Option<&str>, bool)] = &[
-    ('h', Some("help"), false),
-    ('W', Some("width"), true),
-    ('H', Some("height"), true),
-    ('d', Some("density"), true),
-    ('L', None, false),
-    ('S', None, false),
-    ('p', None, true),
-    ('O', Some("orientation"), true),
-    ('i', Some("maze_id"), true),
-    ('s', Some("solution"), true),
+impl Options {
+    /// Record one option; each may be given at most once.
+    fn apply(&mut self, short: char, value: Option<String>) -> Result<(), Exit> {
+        let (slot, value) = match (short, value) {
+            ('h', _) => return Err(Exit::Help),
+            ('L', None) => return set_flag(&mut self.add_a_loop),
+            ('S', None) => return set_flag(&mut self.straight),
+            ('W', Some(value)) => (&mut self.width, value),
+            ('H', Some(value)) => (&mut self.height, value),
+            ('d', Some(value)) => (&mut self.density, value),
+            ('p', Some(value)) => (&mut self.page, value),
+            ('O', Some(value)) => (&mut self.orientation, value),
+            ('i', Some(value)) => (&mut self.maze_id, value),
+            ('s', Some(value)) => (&mut self.solution, value),
+            _ => return Err(Exit::Usage),
+        };
+        if slot.is_some() {
+            return Err(Exit::Usage);
+        }
+        *slot = Some(value);
+        Ok(())
+    }
+}
+
+fn set_flag(flag: &mut bool) -> Result<(), Exit> {
+    if *flag {
+        return Err(Exit::Usage);
+    }
+    *flag = true;
+    Ok(())
+}
+
+struct Args {
+    command: Command,
+    options: Options,
+}
+
+struct OptionSpec {
+    short: char,
+    long: Option<&'static str>,
+    takes_value: bool,
+}
+
+const fn flag(short: char, long: Option<&'static str>) -> OptionSpec {
+    OptionSpec { short, long, takes_value: false }
+}
+
+const fn valued(short: char, long: Option<&'static str>) -> OptionSpec {
+    OptionSpec { short, long, takes_value: true }
+}
+
+const OPTIONS: &[OptionSpec] = &[
+    flag('h', Some("help")),
+    valued('W', Some("width")),
+    valued('H', Some("height")),
+    valued('d', Some("density")),
+    flag('L', None),
+    flag('S', None),
+    valued('p', None),
+    valued('O', Some("orientation")),
+    valued('i', Some("maze_id")),
+    valued('s', Some("solution")),
 ];
 
-/// Print the usage section and exit, as docopt does on bad arguments.
-fn usage_error() -> ! {
-    let start = DOC.find("Usage:").unwrap();
-    let section = &DOC[start..];
-    let end = section.find("\n\n").unwrap_or(section.len());
-    eprintln!("{}", &section[..end]);
-    exit(1);
+/// Why the program stopped early.
+enum Exit {
+    /// `-h`/`--help`: show the full usage text.
+    Help,
+    /// Arguments docopt would reject: show the usage section.
+    Usage,
+    InvalidInt {
+        name: &'static str,
+        value: String,
+    },
+    TooSmall,
+    InvalidPage(String),
+    Write {
+        path: String,
+        error: io::Error,
+    },
 }
 
-fn set(slot: &mut Option<String>, value: String) {
-    if slot.is_some() {
-        usage_error();
-    }
-    *slot = Some(value);
-}
-
-fn apply(args: &mut Args, short: char, value: Option<String>) {
-    match short {
-        'h' => {
-            println!("{}", DOC.trim_matches('\n'));
-            exit(0);
+impl Exit {
+    /// Tell the user what happened, as the Python version does.
+    fn report(self) -> ExitCode {
+        match self {
+            Exit::Help => {
+                println!("{}", DOC.trim_matches('\n'));
+                return ExitCode::SUCCESS;
+            }
+            Exit::Usage => {
+                let start = DOC.find("Usage:").expect("the usage text has a Usage section");
+                let section = &DOC[start..];
+                let end = section.find("\n\n").unwrap_or(section.len());
+                eprintln!("{}", &section[..end]);
+            }
+            Exit::InvalidInt { name, value } => {
+                eprintln!("ValueError: invalid literal for int() with base 10: '{value}' ({name})");
+            }
+            Exit::TooSmall => eprintln!("Width and height must be at least 1"),
+            Exit::InvalidPage(page) => {
+                println!("Page size can only be A4, Letter, or A0");
+                println!("e.g.  -p A4");
+                println!("You had -p {page}");
+                // Python's exit(-1)
+                return ExitCode::from(255);
+            }
+            Exit::Write { path, error } => eprintln!("Could not write {path}: {error}"),
         }
-        'W' => set(&mut args.width, value.unwrap()),
-        'H' => set(&mut args.height, value.unwrap()),
-        'd' => set(&mut args.density, value.unwrap()),
-        'p' => set(&mut args.page, value.unwrap()),
-        'O' => set(&mut args.orientation, value.unwrap()),
-        'i' => set(&mut args.maze_id, value.unwrap()),
-        's' => set(&mut args.solution, value.unwrap()),
-        'L' if !args.add_a_loop => args.add_a_loop = true,
-        'S' if !args.straight => args.straight = true,
-        _ => usage_error(),
+        ExitCode::FAILURE
     }
 }
 
-fn parse_args(argv: &[String]) -> Args {
-    let mut args = Args::default();
+/// Find a long option by its name, or else by a unique prefix of it (as
+/// docopt allows).
+fn find_long(name: &str) -> Result<&'static OptionSpec, Exit> {
+    if let Some(spec) = OPTIONS.iter().find(|o| o.long == Some(name)) {
+        return Ok(spec);
+    }
+    let mut candidates = OPTIONS.iter().filter(|o| o.long.is_some_and(|l| l.starts_with(name)));
+    match (candidates.next(), candidates.next()) {
+        (Some(spec), None) => Ok(spec),
+        _ => Err(Exit::Usage),
+    }
+}
+
+fn find_short(short: char) -> Result<&'static OptionSpec, Exit> {
+    OPTIONS.iter().find(|o| o.short == short).ok_or(Exit::Usage)
+}
+
+fn parse_args(argv: &[String]) -> Result<Args, Exit> {
+    let mut options = Options::default();
     let mut positionals: Vec<String> = Vec::new();
     let mut seen: Vec<char> = Vec::new();
 
-    let mut it = argv.iter().cloned();
-    while let Some(token) = it.next() {
+    let mut tokens = argv.iter().cloned();
+    while let Some(token) = tokens.next() {
         if token == "--" {
-            positionals.extend(it.by_ref());
+            positionals.extend(tokens.by_ref());
         } else if let Some(long) = token.strip_prefix("--") {
             let (name, inline) = match long.split_once('=') {
-                Some((n, v)) => (n, Some(v.to_string())),
+                Some((name, value)) => (name, Some(value.to_owned())),
                 None => (long, None),
             };
-            // exact match, otherwise a unique prefix (as docopt allows)
-            let candidates: Vec<_> = OPTIONS.iter().filter(|o| o.1.is_some_and(|l| l.starts_with(name))).collect();
-            let opt = OPTIONS
-                .iter()
-                .find(|o| o.1 == Some(name))
-                .or(if candidates.len() == 1 { Some(candidates[0]) } else { None })
-                .unwrap_or_else(|| usage_error());
-            let value = match (opt.2, inline) {
-                (true, Some(v)) => Some(v),
-                (true, None) => Some(it.next().unwrap_or_else(|| usage_error())),
-                (false, Some(_)) => usage_error(),
+            let spec = find_long(name)?;
+            let value = match (spec.takes_value, inline) {
+                (true, Some(value)) => Some(value),
+                (true, None) => Some(tokens.next().ok_or(Exit::Usage)?),
+                (false, Some(_)) => return Err(Exit::Usage),
                 (false, None) => None,
             };
-            seen.push(opt.0);
-            apply(&mut args, opt.0, value);
-        } else if token.len() > 1 && token.starts_with('-') {
-            let chars: Vec<char> = token[1..].chars().collect();
-            let mut k = 0;
-            while k < chars.len() {
-                let opt = OPTIONS.iter().find(|o| o.0 == chars[k]).unwrap_or_else(|| usage_error());
-                let value = if opt.2 {
-                    let rest: String = chars[k + 1..].iter().collect();
-                    k = chars.len();
-                    Some(if rest.is_empty() { it.next().unwrap_or_else(|| usage_error()) } else { rest })
+            seen.push(spec.short);
+            options.apply(spec.short, value)?;
+        } else if let Some(mut shorts) = token.strip_prefix('-').filter(|s| !s.is_empty()) {
+            // a cluster of short options, the last of which may take a value
+            // (either the rest of the token or the next one)
+            while let Some(short) = shorts.chars().next() {
+                shorts = &shorts[short.len_utf8()..];
+                let spec = find_short(short)?;
+                let value = if spec.takes_value {
+                    let value = if shorts.is_empty() { tokens.next().ok_or(Exit::Usage)? } else { shorts.to_owned() };
+                    shorts = "";
+                    Some(value)
                 } else {
-                    k += 1;
                     None
                 };
-                seen.push(opt.0);
-                apply(&mut args, opt.0, value);
+                seen.push(spec.short);
+                options.apply(spec.short, value)?;
             }
         } else {
             positionals.push(token);
@@ -131,112 +216,89 @@ fn parse_args(argv: &[String]) -> Args {
     }
 
     let mut positionals = positionals.into_iter();
-    args.command = match positionals.next().as_deref() {
-        Some("pdf") => Some(Command::Pdf),
-        Some("text") => Some(Command::Text),
-        Some("svg") => Some(Command::Svg),
-        _ => usage_error(),
+    let command = match positionals.next().as_deref() {
+        Some("pdf") => Command::Pdf { filename: positionals.next().ok_or(Exit::Usage)? },
+        Some("text") => Command::Text,
+        Some("svg") => Command::Svg { filename: positionals.next().ok_or(Exit::Usage)? },
+        _ => return Err(Exit::Usage),
     };
-    let command = args.command.unwrap();
-    if command != Command::Text {
-        args.filename = Some(positionals.next().unwrap_or_else(|| usage_error()));
-    }
-    if positionals.next().is_some() {
-        usage_error();
+    if positionals.next().is_some() || seen.iter().any(|c| !command.allowed_options().contains(c)) {
+        return Err(Exit::Usage);
     }
 
-    // options each command's usage line accepts
-    let allowed: &[char] = match command {
-        Command::Pdf => &['W', 'H', 'p', 'd', 'S', 'L', 'O', 'i'],
-        Command::Text => &['W', 'H', 'p', 'd', 'L', 'i'],
-        Command::Svg => &['W', 'H', 'p', 'd', 'S', 'L', 'i', 's'],
-    };
-    if seen.iter().any(|c| !allowed.contains(c)) {
-        usage_error();
-    }
-
-    args
+    Ok(Args { command, options })
 }
 
-fn parse_int(name: &str, value: &str) -> i64 {
-    value.trim().parse().unwrap_or_else(|_| {
-        eprintln!("ValueError: invalid literal for int() with base 10: '{value}' ({name})");
-        exit(1);
-    })
+fn parse_int(name: &'static str, value: Option<&str>, default: &str) -> Result<i64, Exit> {
+    let value = value.unwrap_or(default);
+    value.trim().parse().map_err(|_| Exit::InvalidInt { name, value: value.to_owned() })
 }
 
-fn write_file(path: &str, contents: &[u8]) {
-    if let Err(e) = std::fs::write(path, contents) {
-        eprintln!("Could not write {path}: {e}");
-        exit(1);
+fn parse_page(page: &str) -> Result<PageSize, Exit> {
+    if !["a4", "letter", "a0"].contains(&page.to_lowercase().as_str()) {
+        return Err(Exit::InvalidPage(page.to_owned()));
     }
-}
-
-fn run(args: Args) {
-    let width = parse_int("--width", args.width.as_deref().unwrap_or("21"));
-    let height = parse_int("--height", args.height.as_deref().unwrap_or("30"));
-    let density = parse_int("--density", args.density.as_deref().unwrap_or("50"));
-    if width < 1 || height < 1 {
-        eprintln!("Width and height must be at least 1");
-        exit(1);
-    }
-    let (width, height) = (width as usize, height as usize);
-
-    // allow the same maze to be generated if a maze_id is given.
-    let maze_id = args.maze_id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let mut rng = PyRandom::from_str_seed(&maze_id);
-
-    let page_arg = args.page.as_deref().unwrap_or("A4");
-    if !["a4", "letter", "a0"].contains(&page_arg.to_lowercase().as_str()) {
-        println!("Page size can only be A4, Letter, or A0");
-        println!("e.g.  -p A4");
-        println!("You had -p {page_arg}");
-        exit(-1);
-    }
-
     // As in the Python version, only the exact upper case spellings select
     // A4/A0; anything else (e.g. "a4") falls through to Letter.
-    let page = match page_arg {
+    Ok(match page {
         "A4" => PageSize::A4,
         "A0" => PageSize::A0,
         _ => PageSize::Letter,
+    })
+}
+
+fn write_file(path: &str, contents: impl AsRef<[u8]>) -> Result<(), Exit> {
+    std::fs::write(path, contents).map_err(|error| Exit::Write { path: path.to_owned(), error })
+}
+
+fn run(Args { command, options }: Args) -> Result<(), Exit> {
+    let width = parse_int("--width", options.width.as_deref(), "21")?;
+    let height = parse_int("--height", options.height.as_deref(), "30")?;
+    let density = parse_int("--density", options.density.as_deref(), "50")?;
+    let at_least_one = |n: i64| usize::try_from(n).ok().filter(|&n| n >= 1);
+    let (Some(width), Some(height)) = (at_least_one(width), at_least_one(height)) else {
+        return Err(Exit::TooSmall);
     };
+
+    // allow the same maze to be generated if a maze_id is given.
+    let maze_id = options.maze_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let mut rng = PyRandom::from_str_seed(&maze_id);
+
+    let page = parse_page(options.page.as_deref().unwrap_or("A4"))?;
     println!("width = {width}, height={height}");
 
-    let grid = create_maze(width, height, density, args.add_a_loop, &mut rng);
+    let grid = create_maze(width, height, density, options.add_a_loop, &mut rng);
+    let draw_with_curves = !options.straight;
 
-    let solution = args.solution.as_ref().and_then(|_| find_solution(&grid));
-    let draw_with_curves = !args.straight;
-
-    match args.command.unwrap() {
-        Command::Pdf => {
-            let options = PdfOptions {
-                draw_with_curves,
-                page,
-                landscape: args.orientation.as_deref() == Some("L"),
-                width,
-                height,
-            };
-            write_file(args.filename.as_deref().unwrap(), &pdf_render(&grid, &options));
+    match command {
+        Command::Pdf { filename } => {
+            let landscape = options.orientation.as_deref() == Some("L");
+            write_file(&filename, pdf_render(&grid, &PdfOptions { draw_with_curves, page, landscape }))
         }
         // to screen
-        Command::Text => print!("{}", text_render(&grid)),
-        Command::Svg => {
-            let svg = svg_render(&grid, width, height, page, draw_with_curves, None);
-            if let Some(solution_filename) = &args.solution {
-                let solved = svg_render(&grid, width, height, page, draw_with_curves, solution.as_deref());
-                write_file(solution_filename, solved.as_bytes());
+        Command::Text => {
+            print!("{}", text_render(&grid));
+            Ok(())
+        }
+        Command::Svg { filename } => {
+            let svg = svg_render(&grid, page, draw_with_curves, None);
+            if let Some(solution_filename) = &options.solution {
+                let solution = find_solution(&grid);
+                write_file(solution_filename, svg_render(&grid, page, draw_with_curves, solution.as_deref()))?;
             }
-            write_file(args.filename.as_deref().unwrap(), svg.as_bytes());
+            write_file(&filename, svg)
         }
     }
 }
 
-fn main() {
+fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     if argv.is_empty() {
         println!("{DOC}");
-        exit(0);
+        return ExitCode::SUCCESS;
     }
-    run(parse_args(&argv));
+    match parse_args(&argv).and_then(run) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(exit) => exit.report(),
+    }
 }

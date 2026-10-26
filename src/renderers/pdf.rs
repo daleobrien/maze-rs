@@ -11,7 +11,7 @@ use flate2::write::ZlibEncoder;
 use flate2::{Compress, Compression, FlushCompress, Status};
 
 use crate::maze::Grid;
-use crate::renderers::{map_row_bands, page_size, push_fixed_trimmed, PageSize};
+use crate::renderers::{map_bands, page_size, push_fixed_trimmed, Geometry, PageSize};
 
 /// ReportLab's `fp_str` for a single number, appended to `out`.
 ///
@@ -209,6 +209,12 @@ impl Canvas {
         self.push_cm(&[1.0, 0.0, 0.0, 1.0, dx, dy]);
     }
 
+    fn set_line_width(&mut self, width: f64) {
+        self.begin_op();
+        push_fp_num(&mut self.code, width);
+        self.code.push_str(" w");
+    }
+
     fn set_stroke_rgb(&mut self, r: f64, g: f64, b: f64) {
         self.begin_op();
         push_fp_str(&mut self.code, &[r, g, b]);
@@ -232,104 +238,76 @@ impl Canvas {
     }
 }
 
-pub struct PdfOptions {
-    pub draw_with_curves: bool,
-    pub page: PageSize,
-    pub landscape: bool,
-    pub width: usize,
-    pub height: usize,
+/// The walls of each kind of tile, in the tile's own coordinates. Angles
+/// are in degrees, as ReportLab takes them.
+struct Tiles {
+    s: f64,
+    g: f64,
+    n: f64,
+    r: f64,
+    q: f64,
+    v: f64,
+    theta: f64,
+    delta: f64,
+    a: f64,
+    b: f64,
+    draw_with_curves: bool,
 }
 
-/// The uncompressed page content stream.
-pub fn pdf_content(grid: &Grid, options: &PdfOptions) -> (String, f64, f64) {
-    let draw_with_curves = options.draw_with_curves;
-    let (mut page_width, mut page_height) = page_size(options.page);
-    if options.landscape {
-        std::mem::swap(&mut page_width, &mut page_height);
+impl Tiles {
+    fn new(s: f64, draw_with_curves: bool) -> Self {
+        let Geometry { s, g, n, r, q, v, theta } = Geometry::new(s);
+        let theta = theta * 180.0 / PI;
+        Tiles { s, g, n, r, q, v, theta, delta: theta - 90.0, a: g, b: s - g, draw_with_curves }
     }
 
-    let mut c = Canvas::new("1 0 0 1 0 0 cm  BT /F1 12 Tf 14.4 TL ET");
-
-    // 0=butt,1=round,2=square
-    c.push_op("1 J");
-
-    let mut left_margin = 15.0;
-    let mut top_margin = 15.0;
-
-    // cells must be square, it's the math!, I'm not doing it again.
-    // so scale the width if the height will go over the page
-    let height = options.height;
-    let org_width = options.width;
-    let mut width = options.width as f64;
-    let ratio = (page_height - 2.0 * top_margin) / (page_width - 2.0 * left_margin);
-    if height as f64 / width > ratio {
-        width = (height as f64 / ratio).ceil();
-    }
-
-    let s = (page_width - 2.0 * left_margin) / width;
-
-    // center the maze, looks better for mazes that don't fit the page nicely
-    left_margin -= (org_width as f64 - width) * s / 2.0;
-    top_margin -= (s * height as f64 - (page_height - 2.0 * top_margin)) / 2.0;
-
-    let g = s * 0.2;
-    let stroke = s / 7.0;
-    c.push_op(&format!("{} w", fp_str(&[stroke])));
-
-    let k = 0.5;
-
-    let n = -(g / k) + 0.5 * (s - ((g * (4.0 * g - 3.0 * g * k + 2.0 * k * s)) / k).sqrt());
-
-    let r = g / k;
-    let q = n + r;
-    let v = (g * (-1.0 + k)) / k;
-
-    let theta = ((2.0 * g - 2.0 * g * k + k * s) / (2.0 * g - g * k + k * s)).asin() * 180.0 / PI;
-
-    let delta = theta - 90.0;
-
-    let a = g;
-    let b = s - g;
-
-    let s_shape_00 = |p: &mut Path| {
+    fn s_shape_00(&self, p: &mut Path) {
+        let Tiles { a, .. } = *self;
         p.move_to(a, 0.0);
-        if draw_with_curves {
+        if self.draw_with_curves {
             p.arc_to(-a, -a, a, a, 0.0, 90.0);
         } else {
             p.line_to(a, a);
         }
         p.line_to(0.0, a);
-    };
-    let s_shape_01 = |p: &mut Path| {
+    }
+
+    fn s_shape_01(&self, p: &mut Path) {
+        let Tiles { s, a, b, .. } = *self;
         p.move_to(0.0, b);
-        if draw_with_curves {
+        if self.draw_with_curves {
             p.arc_to(-a, b, a, s + a, 270.0, 90.0);
         } else {
             p.line_to(a, b);
         }
         p.line_to(a, s);
-    };
-    let s_shape_10 = |p: &mut Path| {
+    }
+
+    fn s_shape_10(&self, p: &mut Path) {
+        let Tiles { s, a, b, .. } = *self;
         p.move_to(s, a);
-        if draw_with_curves {
+        if self.draw_with_curves {
             p.arc_to(b, -a, s + a, a, 90.0, 90.0);
         } else {
             p.line_to(b, a);
         }
         p.line_to(b, 0.0);
-    };
-    let s_shape_11 = |p: &mut Path| {
+    }
+
+    fn s_shape_11(&self, p: &mut Path) {
+        let Tiles { s, a, b, .. } = *self;
         p.move_to(s, b);
-        if draw_with_curves {
+        if self.draw_with_curves {
             p.arc_to(b, b, s + a, s + a, 270.0, -90.0);
         } else {
             p.line_to(b, b);
         }
         p.line_to(b, s);
-    };
+    }
 
-    // the walls of one tile, in the tile's own coordinates
-    let tile_path = |cell: u8, start: bool, end: bool| {
+    /// The walls of a tile; the start and end tiles have a wider arc.
+    fn path(&self, cell: u8, start: bool, end: bool) -> Path {
+        let Tiles { s, g, n, r, q, v, theta, delta, a, b, draw_with_curves } = *self;
         let mut p = Path::new();
         match cell {
             3 => {
@@ -421,7 +399,7 @@ pub fn pdf_content(grid: &Grid, options: &PdfOptions) -> (String, f64, f64) {
             5 => {
                 // │ └
                 // └──
-                s_shape_10(&mut p);
+                self.s_shape_10(&mut p);
 
                 p.move_to(s, b);
                 if draw_with_curves {
@@ -438,7 +416,7 @@ pub fn pdf_content(grid: &Grid, options: &PdfOptions) -> (String, f64, f64) {
             6 => {
                 // ┌──
                 // │ ┌
-                s_shape_11(&mut p);
+                self.s_shape_11(&mut p);
 
                 p.move_to(s, a);
                 if draw_with_curves {
@@ -454,13 +432,13 @@ pub fn pdf_content(grid: &Grid, options: &PdfOptions) -> (String, f64, f64) {
                 p.move_to(a, s);
                 p.line_to(a, 0.0);
 
-                s_shape_10(&mut p);
-                s_shape_11(&mut p);
+                self.s_shape_10(&mut p);
+                self.s_shape_11(&mut p);
             }
             9 => {
                 // ┘ │
                 // ──┘
-                s_shape_00(&mut p);
+                self.s_shape_00(&mut p);
 
                 p.move_to(b, 0.0);
                 if draw_with_curves {
@@ -473,7 +451,7 @@ pub fn pdf_content(grid: &Grid, options: &PdfOptions) -> (String, f64, f64) {
             10 => {
                 // ──┐
                 // ┐ │
-                s_shape_01(&mut p);
+                self.s_shape_01(&mut p);
 
                 p.move_to(0.0, a);
                 if draw_with_curves {
@@ -493,8 +471,8 @@ pub fn pdf_content(grid: &Grid, options: &PdfOptions) -> (String, f64, f64) {
                 p.move_to(b, s);
                 p.line_to(b, 0.0);
 
-                s_shape_00(&mut p);
-                s_shape_01(&mut p);
+                self.s_shape_00(&mut p);
+                self.s_shape_01(&mut p);
             }
             12 => {
                 // ───
@@ -510,8 +488,8 @@ pub fn pdf_content(grid: &Grid, options: &PdfOptions) -> (String, f64, f64) {
                 p.move_to(0.0, b);
                 p.line_to(s, b);
 
-                s_shape_00(&mut p);
-                s_shape_10(&mut p);
+                self.s_shape_00(&mut p);
+                self.s_shape_10(&mut p);
             }
             14 => {
                 // ───
@@ -519,16 +497,16 @@ pub fn pdf_content(grid: &Grid, options: &PdfOptions) -> (String, f64, f64) {
                 p.move_to(0.0, a);
                 p.line_to(s, a);
 
-                s_shape_01(&mut p);
-                s_shape_11(&mut p);
+                self.s_shape_01(&mut p);
+                self.s_shape_11(&mut p);
             }
             15 => {
                 // ┘ └
                 // ┐ ┌
-                s_shape_00(&mut p);
-                s_shape_10(&mut p);
-                s_shape_01(&mut p);
-                s_shape_11(&mut p);
+                self.s_shape_00(&mut p);
+                self.s_shape_10(&mut p);
+                self.s_shape_01(&mut p);
+                self.s_shape_11(&mut p);
             }
             19 => {
                 // ┤ ├
@@ -569,16 +547,65 @@ pub fn pdf_content(grid: &Grid, options: &PdfOptions) -> (String, f64, f64) {
             _ => {}
         }
         p
-    };
+    }
+}
+
+pub struct PdfOptions {
+    pub draw_with_curves: bool,
+    pub page: PageSize,
+    pub landscape: bool,
+}
+
+/// A page's uncompressed content stream and its size in points.
+pub struct PageContent {
+    pub stream: String,
+    pub width: f64,
+    pub height: f64,
+}
+
+/// The uncompressed page content stream.
+#[must_use]
+pub fn pdf_content(grid: &Grid, options: &PdfOptions) -> PageContent {
+    let (mut page_width, mut page_height) = page_size(options.page);
+    if options.landscape {
+        std::mem::swap(&mut page_width, &mut page_height);
+    }
+
+    let mut c = Canvas::new("1 0 0 1 0 0 cm  BT /F1 12 Tf 14.4 TL ET");
+
+    // 0=butt,1=round,2=square
+    c.push_op("1 J");
+
+    let mut left_margin = 15.0;
+    let mut top_margin = 15.0;
+
+    // cells must be square, it's the math!, I'm not doing it again.
+    // so scale the width if the height will go over the page
+    let (org_width, height) = (grid.width(), grid.height());
+    let mut width = org_width as f64;
+    let ratio = (page_height - 2.0 * top_margin) / (page_width - 2.0 * left_margin);
+    if height as f64 / width > ratio {
+        width = (height as f64 / ratio).ceil();
+    }
+
+    let s = (page_width - 2.0 * left_margin) / width;
+
+    // center the maze, looks better for mazes that don't fit the page nicely
+    left_margin -= (org_width as f64 - width) * s / 2.0;
+    top_margin -= (s * height as f64 - (page_height - 2.0 * top_margin)) / 2.0;
+
+    c.set_line_width(s / 7.0);
+
+    let tiles = Tiles::new(s, options.draw_with_curves);
 
     // a tile is drawn relative to its own cell, so every cell of the same
     // kind has the same path
-    let tiles: Vec<String> = (0..32).map(|cell| tile_path(cell, false, false).code).collect();
+    let tile_code: Vec<String> = (0..32).map(|cell| tiles.path(cell, false, false).code).collect();
 
     let draw_rows = |c: &mut Canvas, rows: Range<usize>| {
-        for (j, row) in grid.iter().enumerate().take(rows.end).skip(rows.start) {
+        for j in rows {
             // upper/lower rows
-            for (i, &cell) in row.iter().enumerate() {
+            for (i, &cell) in grid.row(j).iter().enumerate() {
                 let x_offset = left_margin + i as f64 * s;
                 let y_offset = top_margin + j as f64 * s;
 
@@ -593,12 +620,12 @@ pub fn pdf_content(grid: &Grid, options: &PdfOptions) -> (String, f64, f64) {
                     c.set_stroke_rgb(0.9, 0.1, 0.1);
                     c.set_fill_rgb(0.9, 0.1, 0.1);
                     let mut p = Path::new();
-                    p.circle(s / 2.0, s / 2.0, g / 1.5);
+                    p.circle(s / 2.0, s / 2.0, tiles.g / 1.5);
                     c.draw_path(&p, true);
 
-                    c.draw_path(&tile_path(cell, start, end), false);
+                    c.draw_path(&tiles.path(cell, start, end), false);
                 } else {
-                    c.draw_path_code(&tiles[usize::from(cell)], false);
+                    c.draw_path_code(&tile_code[usize::from(cell)], false);
                 }
                 c.translate(-x_offset, -y_offset);
             }
@@ -608,11 +635,10 @@ pub fn pdf_content(grid: &Grid, options: &PdfOptions) -> (String, f64, f64) {
     // Bands of rows are drawn in parallel. Each cell's first transform is
     // merged with the one that undid the previous cell, so a band starts
     // from that transform and the band before it drops its copy.
-    let row_len = grid.first().map_or(0, |r| r.len());
-    let bands = map_row_bands(grid.len(), row_len, |rows| {
+    let bands = map_bands(height, org_width, |rows| {
         let mut c = Canvas::new("");
         if rows.start > 0 {
-            let (i, j) = (row_len - 1, rows.start - 1);
+            let (i, j) = (org_width - 1, rows.start - 1);
             c.push_cm(&[1.0, 0.0, 0.0, 1.0, -(left_margin + i as f64 * s), -(top_margin + j as f64 * s)]);
         }
         draw_rows(&mut c, rows);
@@ -626,9 +652,9 @@ pub fn pdf_content(grid: &Grid, options: &PdfOptions) -> (String, f64, f64) {
         }
     }
 
-    let mut content = c.code;
-    content.push_str("\n \n");
-    (content, page_width, page_height)
+    let mut stream = c.code;
+    stream.push_str("\n \n");
+    PageContent { stream, width: page_width, height: page_height }
 }
 
 /// Below this a content stream is compressed on one thread.
@@ -642,11 +668,11 @@ const PARALLEL_COMPRESS_MIN_BYTES: usize = 1 << 20;
 fn zlib_compress(data: &[u8]) -> Vec<u8> {
     if data.len() < PARALLEL_COMPRESS_MIN_BYTES {
         let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
-        encoder.write_all(data).unwrap();
-        return encoder.finish().unwrap();
+        encoder.write_all(data).expect("writing to a Vec cannot fail");
+        return encoder.finish().expect("writing to a Vec cannot fail");
     }
 
-    let pieces = map_row_bands(data.len(), 1, |range| {
+    let pieces = map_bands(data.len(), 1, |range| {
         let last = range.end == data.len();
         let input = &data[range.clone()];
         let mut deflate = Compress::new(Compression::default(), false);
@@ -654,7 +680,7 @@ fn zlib_compress(data: &[u8]) -> Vec<u8> {
         let flush = if last { FlushCompress::Finish } else { FlushCompress::Sync };
         loop {
             let consumed = deflate.total_in() as usize;
-            let status = deflate.compress_vec(&input[consumed..], &mut out, flush).unwrap();
+            let status = deflate.compress_vec(&input[consumed..], &mut out, flush).expect("deflate accepts any input");
             let done = deflate.total_in() as usize == input.len() && out.len() < out.capacity();
             if status == Status::StreamEnd || (!last && done) {
                 break;
@@ -716,7 +742,7 @@ fn adler32_combine(adler1: u32, adler2: u32, len2: usize) -> u32 {
 
 /// Current UTC time in PDF date format.
 fn pdf_date() -> String {
-    let secs = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs()) as i64;
+    let secs = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs().try_into().unwrap_or(i64::MAX));
     let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
     // civil-from-days (Howard Hinnant's algorithm)
     let z = days + 719_468;
@@ -728,60 +754,57 @@ fn pdf_date() -> String {
     let day = doy - (153 * mp + 2) / 5 + 1;
     let month = if mp < 10 { mp + 3 } else { mp - 9 };
     let year = yoe + era * 400 + i64::from(month <= 2);
-    format!(
-        "D:{year:04}{month:02}{day:02}{:02}{:02}{:02}+00'00'",
-        rem / 3600,
-        rem % 3600 / 60,
-        rem % 60
-    )
+    format!("D:{year:04}{month:02}{day:02}{:02}{:02}{:02}+00'00'", rem / 3600, rem % 3600 / 60, rem % 60)
 }
 
 /// Render the maze as a complete single-page PDF document.
+#[must_use]
 pub fn pdf_render(grid: &Grid, options: &PdfOptions) -> Vec<u8> {
-    let (content, page_width, page_height) = pdf_content(grid, options);
+    let content = pdf_content(grid, options);
 
-    let stream = zlib_compress(content.as_bytes());
+    let stream = zlib_compress(content.stream.as_bytes());
 
     let date = pdf_date();
-    let media_box = fp_str(&[0.0, 0.0, page_width, page_height]);
-    let objects: Vec<Vec<u8>> = vec![
-        b"<<\n/F1 2 0 R\n>>".to_vec(),
-        b"<<\n/BaseFont /Helvetica /Encoding /WinAnsiEncoding /Name /F1 /Subtype /Type1 /Type /Font\n>>".to_vec(),
-        format!(
-            "<<\n/Contents 7 0 R /MediaBox [ {media_box} ] /Parent 6 0 R /Resources <<\n/Font 1 0 R /ProcSet [ /PDF /Text /ImageB /ImageC /ImageI ]\n>> /Rotate 0 /Type /Page\n>>"
-        )
-        .into_bytes(),
-        b"<<\n/PageMode /UseNone /Pages 6 0 R /Type /Catalog\n>>".to_vec(),
-        format!(
-            "<<\n/Author (Dale O'Brien) /CreationDate ({date}) /Creator (maze-rs) /Keywords () /ModDate ({date}) /Producer (maze-rs) /Subject () /Title (Maze) /Trapped /False\n>>"
-        )
-        .into_bytes(),
-        b"<<\n/Count 1 /Kids [ 3 0 R ] /Type /Pages\n>>".to_vec(),
-        {
-            let mut o = format!("<<\n/Filter /FlateDecode /Length {}\n>>\nstream\n", stream.len()).into_bytes();
-            o.extend_from_slice(&stream);
-            o.extend_from_slice(b"\nendstream");
-            o
-        },
+    let media_box = fp_str(&[0.0, 0.0, content.width, content.height]);
+    let page = format!(
+        "<<\n/Contents 7 0 R /MediaBox [ {media_box} ] /Parent 6 0 R /Resources <<\n/Font 1 0 R /ProcSet [ /PDF /Text /ImageB /ImageC /ImageI ]\n>> /Rotate 0 /Type /Page\n>>"
+    );
+    let info = format!(
+        "<<\n/Author (Dale O'Brien) /CreationDate ({date}) /Creator (maze-rs) /Keywords () /ModDate ({date}) /Producer (maze-rs) /Subject () /Title (Maze) /Trapped /False\n>>"
+    );
+    let contents = [
+        format!("<<\n/Filter /FlateDecode /Length {}\n>>\nstream\n", stream.len()).as_bytes(),
+        &stream,
+        b"\nendstream",
+    ]
+    .concat();
+    let objects: [&[u8]; 7] = [
+        b"<<\n/F1 2 0 R\n>>",
+        b"<<\n/BaseFont /Helvetica /Encoding /WinAnsiEncoding /Name /F1 /Subtype /Type1 /Type /Font\n>>",
+        page.as_bytes(),
+        b"<<\n/PageMode /UseNone /Pages 6 0 R /Type /Catalog\n>>",
+        info.as_bytes(),
+        b"<<\n/Count 1 /Kids [ 3 0 R ] /Type /Pages\n>>",
+        &contents,
     ];
 
     let mut out: Vec<u8> = b"%PDF-1.3\n%\x93\x8c\x8b\x9e maze-rs generated PDF document\n".to_vec();
     let mut offsets = Vec::with_capacity(objects.len());
     for (i, body) in objects.iter().enumerate() {
         offsets.push(out.len());
-        out.extend_from_slice(format!("{} 0 obj\n", i + 1).as_bytes());
+        writeln!(out, "{} 0 obj", i + 1).expect("writing to a Vec cannot fail");
         out.extend_from_slice(body);
         out.extend_from_slice(b"\nendobj\n");
     }
 
     let xref = out.len();
-    out.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes());
-    for off in offsets {
-        out.extend_from_slice(format!("{off:010} 00000 n \n").as_bytes());
+    let size = objects.len() + 1;
+    write!(out, "xref\n0 {size}\n0000000000 65535 f \n").expect("writing to a Vec cannot fail");
+    for offset in offsets {
+        writeln!(out, "{offset:010} 00000 n ").expect("writing to a Vec cannot fail");
     }
-    out.extend_from_slice(
-        format!("trailer\n<<\n/Info 5 0 R\n/Root 4 0 R\n/Size {}\n>>\nstartxref\n{xref}\n%%EOF\n", objects.len() + 1).as_bytes(),
-    );
+    write!(out, "trailer\n<<\n/Info 5 0 R\n/Root 4 0 R\n/Size {size}\n>>\nstartxref\n{xref}\n%%EOF\n")
+        .expect("writing to a Vec cannot fail");
     out
 }
 
