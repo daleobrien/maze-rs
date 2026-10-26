@@ -1,5 +1,6 @@
 //! Locks the generated output for a set of fixed maze ids, so performance
-//! work can't change a single byte of what the generator produces.
+//! work can't change a single byte of what the generator produces without
+//! the hashes here being updated on purpose.
 
 use maze::random::PyRandom;
 use maze::renderers::pdf::{pdf_content, PdfOptions};
@@ -14,7 +15,7 @@ fn sha(bytes: &[u8]) -> String {
 }
 
 /// Hash of every output for one maze: text, SVG (curved, straight and
-/// solved) and the PDF content stream.
+/// solved) and the PDF content stream and tile forms.
 fn outputs(id: &str, width: usize, height: usize, density: i64, add_a_loop: bool) -> String {
     let mut rng = PyRandom::from_str_seed(id);
     let grid = create_maze(width, height, density, add_a_loop, &mut rng);
@@ -27,7 +28,12 @@ fn outputs(id: &str, width: usize, height: usize, density: i64, add_a_loop: bool
         all.extend_from_slice(svg_render(&grid, PageSize::A4, curves, solution.as_deref()).as_bytes());
         for landscape in [false, true] {
             let options = PdfOptions { draw_with_curves: curves, page: PageSize::A4, landscape };
-            all.extend_from_slice(pdf_content(&grid, &options).stream.as_bytes());
+            let content = pdf_content(&grid, &options);
+            all.extend_from_slice(content.stream.as_bytes());
+            for form in &content.forms {
+                all.push(form.cell);
+                all.extend_from_slice(form.stream.as_bytes());
+            }
         }
     }
     sha(&all)
@@ -41,15 +47,15 @@ fn outputs_are_unchanged() {
 }
 
 const CASES: &[(&str, usize, usize, i64, bool, &str)] = &[
-    ("abc", 10, 8, 50, false, "ee53e99f5d19a77b2ad6d71d0f2a61c491f5dcd22b1f1d508c5de4f845ea6de6"),
-    ("my-maze", 23, 30, 50, false, "d3ba65ad9958820dbe13fbd9dd711af68381adc0a8e42e39ddaf84ee6a34abb7"),
-    ("loop", 23, 30, 50, true, "fcc6db79b5f4d8d824a3c5b5518b858fed43ead55b5b2bf24284b6fed63c90c0"),
-    ("dense", 40, 40, 10, false, "37bde527c6c4f0c32e2487be0bf161bd2d774e1326f5de65604ef92deabfdf6e"),
-    ("sparse", 40, 40, 90, true, "9082904b3a826c17279591a1ca22bb830534b5b1b8ee24657c68bb12d58fedfa"),
-    ("big", 120, 84, 50, false, "eedc26ec006c34bd647707d98ba6a01d2d6fbc57d1f071729935dd0695bb08f8"),
-    ("tall", 3, 60, 50, false, "252d6b98c36c46b6294cfbb67e096435d6839adf5595d4f966f8b9b32c906a20"),
-    ("odd-bands", 97, 61, 30, true, "112c84e25eacc7737d5d036f136fae2f7f6960259fcc097c9e9ab672be5c5722"),
-    ("wide", 250, 20, 50, false, "ce29666534fe17f992da80b3df8c149f75b72ea7d5bb879f8e1bd4ceb92d8cd0"),
-    ("readme-big", 168, 240, 50, true, "67d9431d28a6e4736b7270515777bd2ba8ec2cd339eeca41478501710bcafaab"),
-    ("one", 1, 1, 50, false, "1820aed91eb3adad3668d55748660ad05e0884b354f07d3f48dbff5c81bc45fe"),
+    ("abc", 10, 8, 50, false, "fd0c1a58abd3a04d46a4b132501ab394268c24b5f8c421452144e7805abf4c55"),
+    ("my-maze", 23, 30, 50, false, "ec171a34472d92db4ea926c6128a44a92d66864e6d4eb41a04098d79d48c881e"),
+    ("loop", 23, 30, 50, true, "596006e745e52d9dbf7483e456b792a106d9153522dcdbac9e321d10d8d78e69"),
+    ("dense", 40, 40, 10, false, "b34126174a2305d7e95e22b4ed2e96c880237bda0287b6421620c3036896dc85"),
+    ("sparse", 40, 40, 90, true, "5f75ff5cb7d44c5c0cb648bc5790bcb77636f0e0e50dd0271b2f0a21faf451d7"),
+    ("big", 120, 84, 50, false, "e797e308bbd0b41ec523c3e99a22375a34fa17b78b4e2dedcbeaf7fd8be4dcad"),
+    ("tall", 3, 60, 50, false, "97212ea2adbca7e102060191ef07c927d75dc1397d7e13cf8bdb9be6ab86d091"),
+    ("odd-bands", 97, 61, 30, true, "4da4d703b872bc28a6a88c61d2e296940ed83e603bc736d9241363515d9bab07"),
+    ("wide", 250, 20, 50, false, "58770d3a20e0d209165174710203b9e34cd3597933e58b6ffd4b5131c64ad80d"),
+    ("readme-big", 168, 240, 50, true, "c75b6dbe4a87aec11d1e89212c9592d005502e31d80d20f0dcf7df15423115f1"),
+    ("one", 1, 1, 50, false, "ca45f9dda459f8fe26575271a93592bcbc5576bf25a2337feea2be7cf4aaecf5"),
 ];

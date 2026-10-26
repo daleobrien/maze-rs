@@ -2,9 +2,11 @@ maze-rs
 =======
 
 A Rust port of the Python weave-maze generator in `../maze`. Same command
-line, same output: for a given `-i MAZE_ID` the text and SVG output is byte
-for byte identical to the Python version, and the PDF page drawing is
-identical to what ReportLab produces.
+line, same mazes: for a given `-i MAZE_ID` the text output is byte for byte
+identical to the Python version, and the SVG and PDF draw the same maze. Each
+kind of tile is drawn once and reused in every cell of that kind (`<defs>` and
+`<use>` in SVG, a Form XObject in PDF), which makes the files faster to write
+and smaller than the Python version's.
 
 ```bash
 cargo build --release

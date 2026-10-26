@@ -1,8 +1,8 @@
-//! SVG output, byte for byte what the Python version writes.
+//! SVG output. Each kind of tile is drawn once in `<defs>` and placed in its
+//! cells with `<use>`; the drawing itself follows the Python version.
 
 use std::f64::consts::PI;
 use std::fmt::Write as _;
-use std::ops::Range;
 
 use crate::maze::{Grid, CROSS_EW, CROSS_NS};
 use crate::renderers::{map_bands, page_size, push_fixed_trimmed, py_float_repr, Geometry, PageSize};
@@ -439,41 +439,27 @@ impl SvgPath {
 
     // ---- maze walls ----
 
-    /// Draw the walls of the given rows of the maze.
-    fn render_walls(&mut self, grid: &Grid, rows: Range<usize>) {
-        let (last_x, last_y) = (grid.width() - 1, grid.height() - 1);
-
-        for j in rows {
-            let y = j as f64 * self.s;
-
-            for (i, &cell) in grid.row(j).iter().enumerate() {
-                let x = i as f64 * self.s;
-
-                if (i, j) == (0, 0) || (i, j) == (last_x, last_y) {
-                    self.dot(x, y);
-                } else {
-                    match cell {
-                        1 => self.c1(x, y),
-                        2 => self.c2(x, y),
-                        3 => self.c3(x, y),
-                        4 => self.c4(x, y),
-                        5 => self.c5(x, y),
-                        6 => self.c6(x, y),
-                        7 => self.c7(x, y),
-                        8 => self.c8(x, y),
-                        9 => self.c9(x, y),
-                        10 => self.ca(x, y),
-                        11 => self.cb(x, y),
-                        12 => self.cc(x, y),
-                        13 => self.cd(x, y),
-                        14 => self.ce(x, y),
-                        15 => self.cf(x, y),
-                        19 => self.cg(x, y),
-                        28 => self.ch(x, y),
-                        _ => panic!("no svg tile for cell {cell}"),
-                    }
-                }
-            }
+    /// Draw the walls of a tile of kind `cell` with its corner at `(x, y)`.
+    fn draw_tile(&mut self, cell: u8, x: f64, y: f64) {
+        match cell {
+            1 => self.c1(x, y),
+            2 => self.c2(x, y),
+            3 => self.c3(x, y),
+            4 => self.c4(x, y),
+            5 => self.c5(x, y),
+            6 => self.c6(x, y),
+            7 => self.c7(x, y),
+            8 => self.c8(x, y),
+            9 => self.c9(x, y),
+            10 => self.ca(x, y),
+            11 => self.cb(x, y),
+            12 => self.cc(x, y),
+            13 => self.cd(x, y),
+            14 => self.ce(x, y),
+            15 => self.cf(x, y),
+            19 => self.cg(x, y),
+            28 => self.ch(x, y),
+            _ => panic!("no svg tile for cell {cell}"),
         }
     }
 
@@ -719,8 +705,7 @@ impl SvgPath {
     }
 }
 
-/// Render the maze (and optionally its solution) as an SVG document,
-/// matching the Python output byte for byte.
+/// Render the maze (and optionally its solution) as an SVG document.
 #[must_use]
 pub fn svg_render(grid: &Grid, page: PageSize, draw_with_curves: bool, solution: Option<&[(isize, isize)]>) -> String {
     let (page_width, page_height) = page_size(page);
@@ -740,19 +725,65 @@ pub fn svg_render(grid: &Grid, page: PageSize, draw_with_curves: bool, solution:
     let mut over_trace = SvgPath::new("#E51919", 5, "1.0", s, draw_with_curves, false); // solution
     let mut under_trace = SvgPath::new("#E51919", 5, "0.2", s, draw_with_curves, true); // faint solution lines
 
+    // the start and end cells get a dot instead of walls
+    let (last_x, last_y) = (grid.width() - 1, grid.height() - 1);
+    let is_dot = |i: usize, j: usize| (i, j) == (0, 0) || (i, j) == (last_x, last_y);
+
+    // each kind of tile is drawn once, in its own coordinates, and every cell
+    // of that kind refers to it with a `<use>`
+    let mut used = [false; 32];
+    for j in 0..grid.height() {
+        for (i, &cell) in grid.row(j).iter().enumerate() {
+            used[usize::from(cell)] |= !is_dot(i, j);
+        }
+    }
+    let mut defs = String::from("<defs>");
+    for cell in (0..32u8).filter(|&cell| used[usize::from(cell)]) {
+        walls.svg.clear();
+        walls.draw_tile(cell, 0.0, 0.0);
+        write!(defs, r#"<path id="t{cell}" d="{}"/>"#, walls.svg.trim_end()).expect("writing to a String cannot fail");
+    }
+    defs.push_str("</defs>");
+
+    // the start of a cell's `<use>` for each kind of tile, its x for each
+    // column and the rest of it for each row
+    let use_head: Vec<String> = (0..32).map(|cell| format!(r##"<use href="#t{cell}" x=""##)).collect();
+    let column_x: Vec<String> = (0..grid.width())
+        .map(|i| {
+            let mut x = String::new();
+            push_round(&mut x, i as f64 * s);
+            x
+        })
+        .collect();
+    let row_tail: Vec<String> = (0..grid.height())
+        .map(|j| {
+            let mut tail = String::from(r#"" y=""#);
+            push_round(&mut tail, j as f64 * s);
+            tail.push_str(r#""/>"#);
+            tail
+        })
+        .collect();
+
     // rows are independent, so bands of them are drawn in parallel and joined
     let bands = map_bands(grid.height(), grid.width(), |rows| {
-        let mut band = SvgPath::new("#000000", stroke_width, "1.0", s, draw_with_curves, false);
-        // a cell averages about 170 bytes with curves and 115 without; growing
-        // the buffer as it fills costs more than the drawing
-        let per_cell = if draw_with_curves { 192 } else { 128 };
-        band.svg.reserve(rows.len() * grid.width() * per_cell);
-        band.render_walls(grid, rows);
-        (band.svg, band.dots)
+        let mut band = SvgPath::new("#000000", stroke_width, "1.0", s, false, false);
+        let mut uses = String::with_capacity(rows.len() * grid.width() * 40);
+        for j in rows {
+            for (i, &cell) in grid.row(j).iter().enumerate() {
+                if is_dot(i, j) {
+                    band.dot(i as f64 * s, j as f64 * s);
+                } else {
+                    uses.push_str(&use_head[usize::from(cell)]);
+                    uses.push_str(&column_x[i]);
+                    uses.push_str(&row_tail[j]);
+                }
+            }
+        }
+        (uses, band.dots)
     });
-    walls.svg.reserve(bands.iter().map(|b| b.0.len()).sum());
-    for (svg, dots) in bands {
-        walls.svg.push_str(&svg);
+    let mut uses = String::with_capacity(bands.iter().map(|b| b.0.len()).sum());
+    for (band_uses, dots) in bands {
+        uses.push_str(&band_uses);
         walls.dots.push_str(&dots);
     }
     let solution = solution.filter(|s| !s.is_empty());
@@ -770,16 +801,23 @@ pub fn svg_render(grid: &Grid, page: PageSize, draw_with_curves: bool, solution:
 
     // the Python version always appends an (empty) set of extra dots
     let dots = "";
-    let mut paths = vec![&walls];
-    if solution.is_some() {
-        paths.extend([&over_trace, &under_trace]);
-    }
-    let mut out =
-        String::with_capacity(head.len() + paths.iter().map(|p| p.svg.len() + p.dots.len() + 100).sum::<usize>());
+    let mut out = String::with_capacity(
+        head.len() + defs.len() + uses.len() + walls.dots.len() + over_trace.svg.len() + under_trace.svg.len() + 400,
+    );
     out.push_str(&head);
-    for p in paths {
-        out.push(' ');
-        p.write_path(&mut out);
+    out.push(' ');
+    out.push_str(&defs);
+    write!(
+        out,
+        r#" <g stroke-opacity="{}" stroke-width="{}" stroke="{}" stroke-linecap="square">{uses}</g> {}"#,
+        walls.opacity, walls.stroke_width, walls.colour, walls.dots
+    )
+    .expect("writing to a String cannot fail");
+    if solution.is_some() {
+        for p in [&over_trace, &under_trace] {
+            out.push(' ');
+            p.write_path(&mut out);
+        }
     }
     write!(out, " {dots} </svg>").expect("writing to a String cannot fail");
     out
