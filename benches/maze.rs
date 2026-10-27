@@ -1,6 +1,8 @@
 //! Benchmarks for each stage of making a maze: generation, solving and the
 //! three renderers. Run with `cargo bench`.
 
+use std::time::Duration;
+
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use maze::random::Rng;
 use maze::renderers::pdf::{pdf_render, PdfOptions};
@@ -62,5 +64,15 @@ fn bench_render(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_seed, bench_create, bench_solve, bench_render);
+// Criterion's 3s default warm-up per benchmark dominates the run time; 0.2s is
+// plenty for these. `--warm-up-time <secs>` on the command line still overrides it.
+fn config() -> Criterion {
+    Criterion::default().warm_up_time(Duration::from_millis(200))
+}
+
+criterion_group! {
+    name = benches;
+    config = config();
+    targets = bench_seed, bench_create, bench_solve, bench_render
+}
 criterion_main!(benches);
