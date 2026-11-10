@@ -9,6 +9,7 @@
 use std::ops::{Index, IndexMut};
 
 use crate::random::Rng;
+use crate::simd::push_row_edges;
 
 // constants to aid with describing the passage directions
 pub const N: u8 = 0x1;
@@ -202,12 +203,9 @@ pub fn create_maze(width: usize, height: usize, density: i64, add_a_loop: bool, 
     // crossing; each one joins a cell to its north or west neighbour, and is
     // packed into a u32 as `cell * 2 + is_west` (cells numbered row by row)
     // so that shuffling and walking the list stays in cache for large mazes
-    //
-    // Whether a crossing is nearby is random, so rather than branch on it,
-    // each candidate edge is always written and the end of the list only
-    // moves past it if it is kept.
     let open = |cell: u8| usize::from((cell != CROSS_NS) & (cell != CROSS_EW));
-    let mut edges = vec![0u32; 2 * width * height];
+    // room for the vector version to store whole groups past the last edge
+    let mut edges = vec![0u32; 2 * width * height + 4];
     let mut kept = 0;
     for x in 1..width {
         // the top row has no crossings, so only edges to the west
@@ -221,14 +219,7 @@ pub fn create_maze(width: usize, height: usize, density: i64, add_a_loop: bool, 
         // unless the cell above it is one
         edges[kept] = (first * 2) as u32;
         kept += open(above[0]);
-        for x in 1..width {
-            let id = ((first + x) * 2) as u32;
-            let here = open(row[x]);
-            edges[kept] = id;
-            kept += here & open(above[x]);
-            edges[kept] = id + 1;
-            kept += here & open(row[x - 1]);
-        }
+        kept = push_row_edges(above, row, first, &mut edges, kept);
     }
     edges.truncate(kept);
 

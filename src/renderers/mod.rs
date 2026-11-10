@@ -58,6 +58,47 @@ pub(crate) fn map_bands<T: Send>(len: usize, cost_per_item: usize, f: impl Fn(Ra
     })
 }
 
+/// A short string that is appended with one fixed-size 32-byte copy (a pair
+/// of vector stores) rather than a variable-length `memcpy`, which costs
+/// more than the copy itself for the few bytes a cell adds to the output.
+/// Strings too long for that are appended normally.
+pub(crate) struct Piece {
+    bytes: [u8; Piece::WIDTH],
+    len: usize,
+    long: Option<String>,
+}
+
+impl Piece {
+    const WIDTH: usize = 32;
+
+    pub fn new(s: &str) -> Self {
+        let mut bytes = [0; Piece::WIDTH];
+        if s.len() <= Piece::WIDTH {
+            bytes[..s.len()].copy_from_slice(s.as_bytes());
+            Piece { bytes, len: s.len(), long: None }
+        } else {
+            Piece { bytes, len: 0, long: Some(s.to_owned()) }
+        }
+    }
+
+    #[inline]
+    pub fn push_to(&self, out: &mut String) {
+        if let Some(long) = &self.long {
+            out.push_str(long);
+            return;
+        }
+        out.reserve(Piece::WIDTH);
+        // SAFETY: the 32 bytes written fit in the reserved capacity, and only
+        // the first `len` of them, a whole UTF-8 string, become part of `out`
+        unsafe {
+            let v = out.as_mut_vec();
+            let len = v.len();
+            v.as_mut_ptr().add(len).cast::<[u8; Piece::WIDTH]>().write_unaligned(self.bytes);
+            v.set_len(len + self.len);
+        }
+    }
+}
+
 /// The measurements of a tile with sides `s`, shared by the SVG and PDF
 /// renderers and named as in the Python version: `g` is the gap between a
 /// wall and the cell's edge, and the rest place the three arcs that make a

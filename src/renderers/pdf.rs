@@ -14,7 +14,8 @@ use flate2::write::ZlibEncoder;
 use flate2::{Compress, Compression, FlushCompress, Status};
 
 use crate::maze::Grid;
-use crate::renderers::{map_bands, page_size, push_fixed_trimmed, Geometry, PageSize};
+use crate::simd::adler32;
+use crate::renderers::{map_bands, page_size, Piece, push_fixed_trimmed, Geometry, PageSize};
 
 /// ReportLab's `fp_str` for a single number, appended to `out`.
 ///
@@ -600,7 +601,7 @@ pub fn pdf_content(grid: &Grid, options: &PdfOptions) -> PageContent {
     push_fp_num(&mut step, s);
     step.push_str(" 0 cm");
     let draw_form: Vec<String> = (0..32).map(|cell| format!("\n/T{cell} Do")).collect();
-    let step_and_draw: Vec<String> = draw_form.iter().map(|draw| format!("{step} {}", &draw[1..])).collect();
+    let step_and_draw: Vec<Piece> = draw_form.iter().map(|draw| Piece::new(&format!("{step} {}", &draw[1..]))).collect();
 
     let draw_rows = |c: &mut Canvas, rows: Range<usize>| {
         for j in rows {
@@ -628,7 +629,7 @@ pub fn pdf_content(grid: &Grid, options: &PdfOptions) -> PageContent {
                     c.draw_path(&tiles.path(cell, start, end), false);
                     c.push_op("0 0 0 RG");
                 } else if i > 0 {
-                    c.code.push_str(&step_and_draw[usize::from(cell)]);
+                    step_and_draw[usize::from(cell)].push_to(&mut c.code);
                 } else {
                     c.code.push_str(&draw_form[usize::from(cell)]);
                 }
@@ -699,20 +700,6 @@ fn zlib_compress(data: &[u8]) -> Vec<u8> {
 }
 
 const ADLER_BASE: u32 = 65_521;
-
-fn adler32(data: &[u8]) -> u32 {
-    let (mut a, mut b) = (1u32, 0u32);
-    // the most bytes that can be summed before the sums can overflow
-    for chunk in data.chunks(5552) {
-        for &byte in chunk {
-            a += u32::from(byte);
-            b += a;
-        }
-        a %= ADLER_BASE;
-        b %= ADLER_BASE;
-    }
-    (b << 16) | a
-}
 
 /// The Adler-32 of two pieces joined, from the checksum of each and the
 /// length of the second (zlib's `adler32_combine`).
