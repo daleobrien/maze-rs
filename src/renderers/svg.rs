@@ -5,7 +5,7 @@ use std::f64::consts::PI;
 use std::fmt::Write as _;
 
 use crate::maze::{Grid, CROSS_EW, CROSS_NS};
-use crate::renderers::{map_bands, page_size, push_fixed_trimmed, py_float_repr, Geometry, PageSize};
+use crate::renderers::{map_bands, page_size, Piece, push_fixed_trimmed, py_float_repr, Geometry, PageSize};
 
 const QUARTER: f64 = PI / 2.0;
 const HALF: f64 = PI;
@@ -747,20 +747,20 @@ pub fn svg_render(grid: &Grid, page: PageSize, draw_with_curves: bool, solution:
 
     // the start of a cell's `<use>` for each kind of tile, its x for each
     // column and the rest of it for each row
-    let use_head: Vec<String> = (0..32).map(|cell| format!(r##"<use href="#t{cell}" x=""##)).collect();
-    let column_x: Vec<String> = (0..grid.width())
+    let use_head: Vec<Piece> = (0..32).map(|cell| Piece::new(&format!(r##"<use href="#t{cell}" x=""##))).collect();
+    let column_x: Vec<Piece> = (0..grid.width())
         .map(|i| {
             let mut x = String::new();
             push_round(&mut x, i as f64 * s);
-            x
+            Piece::new(&x)
         })
         .collect();
-    let row_tail: Vec<String> = (0..grid.height())
+    let row_tail: Vec<Piece> = (0..grid.height())
         .map(|j| {
             let mut tail = String::from(r#"" y=""#);
             push_round(&mut tail, j as f64 * s);
             tail.push_str(r#""/>"#);
-            tail
+            Piece::new(&tail)
         })
         .collect();
 
@@ -773,9 +773,9 @@ pub fn svg_render(grid: &Grid, page: PageSize, draw_with_curves: bool, solution:
                 if is_dot(i, j) {
                     band.dot(i as f64 * s, j as f64 * s);
                 } else {
-                    uses.push_str(&use_head[usize::from(cell)]);
-                    uses.push_str(&column_x[i]);
-                    uses.push_str(&row_tail[j]);
+                    use_head[usize::from(cell)].push_to(&mut uses);
+                    column_x[i].push_to(&mut uses);
+                    row_tail[j].push_to(&mut uses);
                 }
             }
         }
