@@ -4,7 +4,8 @@ A fast Rust generator for **weave mazes**: mazes whose passages cross over
 and under each other. It writes them as SVG, PDF or plain text, with an
 optional solution and an optional hand-drawn look.
 
-It is a port of the Python generator in `../maze`, with the same command line
+It is a port of the Python generator
+[daleobrien/maze](https://github.com/daleobrien/maze), with the same command line
 and the same drawing.
 
 <p align="center">
