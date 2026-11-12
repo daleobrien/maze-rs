@@ -1,4 +1,5 @@
-use crate::maze::Grid;
+use crate::maze::{Grid, CROSS_EW, CROSS_NS};
+use crate::renderers::{Solution, TILE_KINDS};
 
 fn tile(cell: u8) -> (&'static str, &'static str) {
     match cell {
@@ -18,8 +19,8 @@ fn tile(cell: u8) -> (&'static str, &'static str) {
         13 => ("┘ └", "───"),
         14 => ("───", "┐ ┌"),
         15 => ("┘ └", "┐ ┌"),
-        19 => ("┤ ├", "┤ ├"),
-        28 => ("┴─┴", "┬─┬"),
+        CROSS_NS => ("┤ ├", "┤ ├"),
+        CROSS_EW => ("┴─┴", "┬─┬"),
         _ => panic!("no text tile for cell {cell}"),
     }
 }
@@ -31,14 +32,14 @@ const MAX_HALF: usize = 9;
 /// is copied with one 16-byte store whatever its length, and their lengths
 /// (0 for a cell with no tile).
 struct Halves {
-    bytes: [[[u8; 16]; 2]; 32],
-    lens: [[u8; 2]; 32],
+    bytes: [[[u8; 16]; 2]; TILE_KINDS],
+    lens: [[u8; 2]; TILE_KINDS],
 }
 
 impl Halves {
     fn new() -> Self {
-        let mut halves = Halves { bytes: [[[0; 16]; 2]; 32], lens: [[0; 2]; 32] };
-        for cell in [0u8, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 19, 28] {
+        let mut halves = Halves { bytes: [[[0; 16]; 2]; TILE_KINDS], lens: [[0; 2]; TILE_KINDS] };
+        for cell in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, CROSS_NS, CROSS_EW] {
             let (top, bottom) = tile(cell);
             for (k, half) in [top, bottom].into_iter().enumerate() {
                 halves.bytes[usize::from(cell)][k][..half.len()].copy_from_slice(half.as_bytes());
@@ -57,6 +58,8 @@ impl Halves {
             let cell = usize::from(cell);
             let half_len = usize::from(self.lens[cell][k]);
             if half_len == 0 {
+                // every tile has at least one character, so this is a cell
+                // with no tile, and `tile` panics for it with its value
                 tile(cell as u8);
             }
             // SAFETY: at most MAX_HALF bytes are kept per cell, so the 16
@@ -121,7 +124,7 @@ fn heavy(c: char) -> char {
 /// Render the maze as [`text_render`] does, with the cells on `solution`
 /// drawn in heavy lines.
 #[must_use]
-pub fn text_render_solved(grid: &Grid, solution: &[(isize, isize)]) -> String {
+pub fn text_render_solved(grid: &Grid, solution: Solution) -> String {
     let mut on_path = vec![false; grid.width() * grid.height()];
     let mut mark = |(x, y): (isize, isize)| {
         if let (Ok(x), Ok(y)) = (usize::try_from(x), usize::try_from(y)) {

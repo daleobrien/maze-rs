@@ -1,11 +1,13 @@
 //! Benchmarks for each stage of making a maze: generation, solving and the
-//! three renderers. Run with `cargo bench`.
+//! renderers, plain, styled and inked. Run with `cargo bench`.
 
 use std::time::Duration;
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use maze::random::Rng;
+use maze::renderers::ink::{ink_pdf, ink_svg, seed_from_id};
 use maze::renderers::pdf::{pdf_render, PdfOptions};
+use maze::renderers::style::{styled_pdf, styled_svg, Corners, Style};
 use maze::renderers::svg::svg_render;
 use maze::renderers::text::text_render;
 use maze::renderers::PageSize;
@@ -60,6 +62,23 @@ fn bench_render(c: &mut Criterion) {
         });
         let options = PdfOptions { draw_with_curves: true, page: PageSize::A4, landscape: false };
         group.bench_function(format!("pdf/{}", label(w, h)), |b| b.iter(|| pdf_render(black_box(&g), &options)));
+
+        // a style that reshapes the walls and adds the frame
+        let style = Style { corners: Some(Corners::Bevel), frame: Some("bench".to_owned()), ..Style::default() };
+        group.bench_function(format!("styled_svg/{}", label(w, h)), |b| {
+            b.iter(|| styled_svg(black_box(&g), PageSize::A4, true, solution.as_deref(), &style));
+        });
+        group.bench_function(format!("styled_pdf/{}", label(w, h)), |b| {
+            b.iter(|| styled_pdf(black_box(&g), &options, solution.as_deref(), &style));
+        });
+        let seed = seed_from_id("bench");
+        let plain = Style::default();
+        group.bench_function(format!("ink_svg/{}", label(w, h)), |b| {
+            b.iter(|| ink_svg(black_box(&g), PageSize::A4, true, solution.as_deref(), seed, &plain));
+        });
+        group.bench_function(format!("ink_pdf/{}", label(w, h)), |b| {
+            b.iter(|| ink_pdf(black_box(&g), &options, solution.as_deref(), seed, &plain));
+        });
     }
     group.finish();
 }

@@ -8,6 +8,9 @@
 //! unchanged. When one is given, the walls are rebuilt here from scratch for
 //! each kind of tile, so every option works with every other.
 //!
+//! The page round the maze (background, frame and footer) is drawn by
+//! `frame`, and the walls are written out by `path`.
+//!
 //! A tile's walls are found by walking clockwise around the corridor's
 //! inner box: a closed side adds an edge of the box, an open side ends one
 //! wall and starts another at the cell's edge. Each wall is then a polyline
@@ -15,13 +18,16 @@
 //! rounded, as far as the neighbouring corners allow. Rounding as far as
 //! possible gives the same curves as the plain renderer.
 
-use std::f64::consts::PI;
 use std::fmt::Write as _;
 
-use crate::maze::{Grid, CROSS_EW, CROSS_NS, E, N, S, W};
-use crate::renderers::pdf::{pdf_date, zlib_compress, PageLayout, PdfOptions};
-use crate::renderers::svg::{is_dot, path_data, svg_scale};
-use crate::renderers::{push_fixed_trimmed, py_float_repr, PageSize};
+use crate::maze::{is_crossing, Grid, CROSS_EW, E, N, S, W};
+use crate::renderers::frame::{pdf_background, pdf_document, pdf_flip, pdf_frame, pdf_layout, svg_frame, svg_open};
+use crate::renderers::path::{
+    distance, parse_path, polyline_chain, push_pdf_circle, push_pdf_xy, towards, Chain, Point, Segment,
+};
+use crate::renderers::pdf::PdfOptions;
+use crate::renderers::svg::{dots, is_dot, push_uses, svg_scale, Traces};
+use crate::renderers::{map_bands, push_fixed_trimmed, used_tiles, PageSize, Piece, Solution, TILE_KINDS};
 
 /// How the corners of the corridors are drawn.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -93,6 +99,9 @@ pub struct Style {
     pub frame: Option<String>,
 }
 
+/// A corridor's width, as a fraction of a cell, when the style doesn't set one.
+const CORRIDOR: f64 = 0.6;
+
 impl Style {
     /// Whether no option is set, so the plain renderers can be used.
     #[must_use]
@@ -106,33 +115,57 @@ impl Style {
         self.corners.is_some() || self.dead_ends.is_some() || self.corridor.is_some() || self.bridge_gap.is_some()
     }
 
+    /// Whether the solution, and walls of the plain shape, are drawn with
+    /// curves: as asked (`-S` or not), unless the corners say otherwise.
+    pub(crate) fn curves(&self, draw_with_curves: bool) -> bool {
+        self.corners.map_or(draw_with_curves, |c| c == Corners::Round)
+    }
+
+    /// The line width and colours, with a renderer's own defaults for those
+    /// the style doesn't set.
+    pub(crate) fn pens(&self, default: Pens) -> Pens {
+        Pens {
+            line: self.line.unwrap_or(default.line),
+            wall: self.wall_colour.unwrap_or(default.wall),
+            solution: self.solution_colour.unwrap_or(default.solution),
+        }
+    }
+
     /// The tile shape, with defaults filled in; plain `-S` means square corners.
     fn shape(&self, draw_with_curves: bool) -> Shape {
         Shape {
             corners: self.corners.unwrap_or(if draw_with_curves { Corners::Round } else { Corners::Square }),
             dead_ends: self.dead_ends.unwrap_or(DeadEnds::Bulb),
-            corridor: self.corridor.unwrap_or(0.6),
+            corridor: self.corridor.unwrap_or(CORRIDOR),
             bridge_gap: self.bridge_gap.unwrap_or(0.0),
         }
     }
 
-    /// Each kind of tile's walls as SVG path data, in the tile's own
-    /// coordinates, for cells of side `s` (empty for kinds that aren't
-    /// tiles).
-    pub(crate) fn tiles(&self, s: f64, draw_with_curves: bool) -> Vec<String> {
+    /// The walls of each kind of tile marked in `used`, in the tile's own
+    /// coordinates, for cells of side `s` (none for the other kinds). Their
+    /// numbers are as written in SVG, so the SVG, PDF and ink drawings of a
+    /// tile agree.
+    pub(crate) fn tiles(&self, s: f64, draw_with_curves: bool, used: &[bool; TILE_KINDS]) -> Vec<Vec<Chain>> {
         let shape = self.shape(draw_with_curves);
-        (0..32u8)
+        (0..TILE_KINDS as u8)
             .map(|cell| {
-                let mut d = String::new();
-                if cell < 16 || cell == CROSS_NS || cell == CROSS_EW {
-                    for chain in shape.chains(cell, s) {
-                        chain.push_svg(&mut d);
-                    }
+                if used[usize::from(cell)] && (cell < 16 || is_crossing(cell)) {
+                    shape.chains(cell, s).into_iter().map(Chain::svg_rounded).collect()
+                } else {
+                    Vec::new()
                 }
-                d
             })
             .collect()
     }
+}
+
+/// The line width and colours a maze is drawn with.
+#[derive(Clone, Copy)]
+pub(crate) struct Pens {
+    /// The width of the walls.
+    pub line: f64,
+    pub wall: Colour,
+    pub solution: Colour,
 }
 
 #[derive(Clone, Copy)]
@@ -143,126 +176,12 @@ struct Shape {
     bridge_gap: f64,
 }
 
-type Point = (f64, f64);
-
-enum Segment {
-    Line(Point),
-    Arc { radius: f64, large: bool, sweep: bool, to: Point },
-}
-
-/// One continuous wall.
-struct Chain {
-    start: Point,
-    segments: Vec<Segment>,
-}
-
-fn push_xy(out: &mut String, (x, y): Point) {
-    push_fixed_trimmed(out, x, 2);
-    out.push(' ');
-    push_fixed_trimmed(out, y, 2);
-}
-
-fn distance(p: Point, q: Point) -> f64 {
-    (q.0 - p.0).hypot(q.1 - p.1)
-}
-
-/// The point `r` along the way from `from` towards `to`.
-fn towards(from: Point, to: Point, r: f64) -> Point {
-    let d = distance(from, to);
-    (from.0 + (to.0 - from.0) * r / d, from.1 + (to.1 - from.1) * r / d)
-}
-
-impl Chain {
-    fn push_svg(&self, out: &mut String) {
-        out.push('M');
-        push_xy(out, self.start);
-        for segment in &self.segments {
-            match *segment {
-                Segment::Line(to) => {
-                    out.push('L');
-                    push_xy(out, to);
-                }
-                Segment::Arc { radius, large, sweep, to } => {
-                    out.push('A');
-                    push_fixed_trimmed(out, radius, 2);
-                    out.push(' ');
-                    push_fixed_trimmed(out, radius, 2);
-                    write!(out, " 0 {} {} ", u8::from(large), u8::from(sweep))
-                        .expect("writing to a String cannot fail");
-                    push_xy(out, to);
-                }
-            }
-        }
-    }
-
-    fn push_pdf(&self, out: &mut String) {
-        push_pdf_xy(out, self.start);
-        out.push_str(" m\n");
-        let mut at = self.start;
-        for segment in &self.segments {
-            match *segment {
-                Segment::Line(to) => {
-                    push_pdf_xy(out, to);
-                    out.push_str(" l\n");
-                    at = to;
-                }
-                Segment::Arc { radius, large, sweep, to } => {
-                    push_pdf_arc(out, at, to, radius, large, sweep);
-                    at = to;
-                }
-            }
-        }
-    }
-}
-
-fn push_pdf_xy(out: &mut String, (x, y): Point) {
-    push_fixed_trimmed(out, x, 3);
-    out.push(' ');
-    push_fixed_trimmed(out, y, 3);
-}
-
-/// An SVG circular arc as PDF Bezier curves (SVG 1.1 F.6.5, rx = ry).
-fn push_pdf_arc(out: &mut String, from: Point, to: Point, radius: f64, large: bool, sweep: bool) {
-    let (x1p, y1p) = ((from.0 - to.0) / 2.0, (from.1 - to.1) / 2.0);
-    let d2 = x1p * x1p + y1p * y1p;
-    if d2 < 1e-12 {
-        return;
-    }
-    let r = radius.max(d2.sqrt());
-    let sign = if large == sweep { -1.0 } else { 1.0 };
-    let coef = sign * ((r * r - d2) / d2).max(0.0).sqrt();
-    let (cxp, cyp) = (coef * y1p, -coef * x1p);
-    let (cx, cy) = (cxp + (from.0 + to.0) / 2.0, cyp + (from.1 + to.1) / 2.0);
-    let theta = (y1p - cyp).atan2(x1p - cxp);
-    let mut delta = (-y1p - cyp).atan2(-x1p - cxp) - theta;
-    if sweep && delta < 0.0 {
-        delta += 2.0 * PI;
-    } else if !sweep && delta > 0.0 {
-        delta -= 2.0 * PI;
-    }
-    let n = (delta.abs() / (PI / 2.0)).ceil().max(1.0) as usize;
-    let step = delta / n as f64;
-    let k = 4.0 / 3.0 * (step / 4.0).tan() * r;
-    for i in 0..n {
-        let (t0, t1) = (theta + step * i as f64, theta + step * (i + 1) as f64);
-        let p0 = (cx + r * t0.cos(), cy + r * t0.sin());
-        let p3 = if i + 1 == n { to } else { (cx + r * t1.cos(), cy + r * t1.sin()) };
-        let c1 = (p0.0 - k * t0.sin(), p0.1 + k * t0.cos());
-        let c2 = (p3.0 + k * t1.sin(), p3.1 - k * t1.cos());
-        for p in [c1, c2, p3] {
-            push_pdf_xy(out, p);
-            out.push(' ');
-        }
-        out.push_str("c\n");
-    }
-}
-
 impl Shape {
     /// The walls of a tile of kind `cell`, with cells of side `s`.
     fn chains(self, cell: u8, s: f64) -> Vec<Chain> {
         let hw = self.corridor * s / 2.0;
         let (a, b) = (s / 2.0 - hw, s / 2.0 + hw);
-        if cell == CROSS_NS || cell == CROSS_EW {
+        if is_crossing(cell) {
             let g = (self.bridge_gap * s).min(a * 0.9);
             let mut lines = vec![((a, 0.0), (a, s)), ((b, 0.0), (b, s))];
             for y in [a, b] {
@@ -290,45 +209,46 @@ impl Shape {
                     if let Some(chain) = bulb(s, hw) {
                         return vec![rotate(chain, side, s)];
                     }
-                    return self.walk(open, s, a, b, Corners::Round);
+                    return walk(open, s, a, b, Corners::Round);
                 }
-                DeadEnds::Round => return self.walk(open, s, a, b, Corners::Round),
-                DeadEnds::Flat => return self.walk(open, s, a, b, Corners::Square),
+                DeadEnds::Round => return walk(open, s, a, b, Corners::Round),
+                DeadEnds::Flat => return walk(open, s, a, b, Corners::Square),
             }
         }
-        self.walk(open, s, a, b, self.corners)
+        walk(open, s, a, b, self.corners)
     }
+}
 
-    /// The walls found by walking clockwise around the inner box.
-    #[allow(clippy::unused_self)]
-    fn walk(self, open: [bool; 4], s: f64, a: f64, b: f64, corners: Corners) -> Vec<Chain> {
-        // the box's corners, and where each side's walls meet the cell edge
-        // when it is open, both clockwise from the top left
-        let corner = [(a, a), (b, a), (b, b), (a, b)];
-        let edge = [[(a, 0.0), (b, 0.0)], [(s, a), (s, b)], [(b, s), (a, s)], [(0.0, b), (0.0, a)]];
+/// The walls of a tile open on the sides marked in `open` (north, east,
+/// south, west), with the corridor's inner box from `a` to `b` across a
+/// cell of side `s`, found by walking clockwise around the box.
+fn walk(open: [bool; 4], s: f64, a: f64, b: f64, corners: Corners) -> Vec<Chain> {
+    // the box's corners, and where each side's walls meet the cell edge
+    // when it is open, both clockwise from the top left
+    let corner = [(a, a), (b, a), (b, b), (a, b)];
+    let edge = [[(a, 0.0), (b, 0.0)], [(s, a), (s, b)], [(b, s), (a, s)], [(0.0, b), (0.0, a)]];
 
-        let Some(first) = open.iter().position(|&o| o) else {
-            let mut points = corner.to_vec();
-            points.push(corner[0]);
-            return vec![polyline_chain(&points)];
-        };
-        let mut lines: Vec<Vec<Point>> = Vec::new();
-        let mut current = vec![edge[first][1], corner[(first + 1) % 4]];
-        for j in 1..4 {
-            let k = (first + j) % 4;
-            if open[k] {
-                current.push(edge[k][0]);
-                lines.push(std::mem::take(&mut current));
-                current = vec![edge[k][1], corner[(k + 1) % 4]];
-            } else {
-                current.push(corner[(k + 1) % 4]);
-            }
+    let Some(first) = open.iter().position(|&o| o) else {
+        let mut points = corner.to_vec();
+        points.push(corner[0]);
+        return vec![polyline_chain(&points)];
+    };
+    let mut lines: Vec<Vec<Point>> = Vec::new();
+    let mut current = vec![edge[first][1], corner[(first + 1) % 4]];
+    for j in 1..4 {
+        let k = (first + j) % 4;
+        if open[k] {
+            current.push(edge[k][0]);
+            lines.push(std::mem::take(&mut current));
+            current = vec![edge[k][1], corner[(k + 1) % 4]];
+        } else {
+            current.push(corner[(k + 1) % 4]);
         }
-        current.push(edge[first][0]);
-        lines.push(current);
-
-        lines.iter().map(|points| shape_corners(&drop_straight(points), corners)).collect()
     }
+    current.push(edge[first][0]);
+    lines.push(current);
+
+    lines.iter().map(|points| shape_corners(&drop_straight(points), corners)).collect()
 }
 
 /// The points of a polyline without those in the middle of a straight run.
@@ -350,10 +270,6 @@ fn drop_straight(points: &[Point]) -> Vec<Point> {
         out.push(p);
     }
     out
-}
-
-fn polyline_chain(points: &[Point]) -> Chain {
-    Chain { start: points[0], segments: points[1..].iter().map(|&p| Segment::Line(p)).collect() }
 }
 
 /// Square, cut off or round each corner of a polyline, by as much as its
@@ -416,351 +332,22 @@ fn bulb(s: f64, hw: f64) -> Option<Chain> {
 /// east, 2 south, 3 west), turning clockwise about the cell's centre.
 fn rotate(chain: Chain, side: usize, s: f64) -> Chain {
     let c = s / 2.0;
-    let turn = |(x, y): Point| {
+    chain.map_points(|(x, y)| {
         let mut p = (x - c, y - c);
         for _ in 0..side {
             p = (-p.1, p.0);
         }
         (p.0 + c, p.1 + c)
-    };
-    Chain {
-        start: turn(chain.start),
-        segments: chain
-            .segments
-            .into_iter()
-            .map(|segment| match segment {
-                Segment::Line(p) => Segment::Line(turn(p)),
-                Segment::Arc { radius, large, sweep, to } => Segment::Arc { radius, large, sweep, to: turn(to) },
-            })
-            .collect(),
-    }
+    })
 }
-
-// ---- the frame, arrows and footer ----
-
-/// The margin round an SVG maze with a frame, for cells of side `s`.
-fn svg_margin(s: f64) -> f64 {
-    (2.0 * s).max(48.0)
-}
-
-/// Open an SVG document for a maze `w` by `h` pixels, leaving room for the
-/// frame if there is one and painting the background if there is one.
-pub(crate) fn svg_open(out: &mut String, w: f64, h: f64, s: f64, style: &Style) {
-    let m = if style.frame.is_some() { svg_margin(s) } else { 0.0 };
-    let (vw, vh) = (py_float_repr(w + 2.0 * m), py_float_repr(h + 2.0 * m));
-    let origin = py_float_repr(-m);
-    let origin = if m == 0.0 { "0".to_owned() } else { origin };
-    write!(
-        out,
-        r#"<svg id="maze" xmlns="http://www.w3.org/2000/svg" viewBox="{origin} {origin} {vw} {vh}" width="{vw}px" height="{vh}px">"#
-    )
-    .expect("writing to a String cannot fail");
-    if let Some(background) = style.background {
-        write!(out, r#"<rect x="{origin}" y="{origin}" width="{vw}" height="{vh}" fill="{}"/>"#, background.hex())
-            .expect("writing to a String cannot fail");
-    }
-}
-
-/// The frame's lines and arrows in maze coordinates, as polylines, for a
-/// maze `w` by `h` with cells of side `s` and a margin `m` round it.
-fn frame_lines(w: f64, h: f64, s: f64, m: f64) -> Vec<Vec<Point>> {
-    let arrow = |from: Point, to: Point| {
-        let head = (m * 0.12).min(s * 0.4).max(4.0);
-        vec![vec![from, to], vec![(to.0 - head, to.1 - head * 0.7), to, (to.0 - head, to.1 + head * 0.7)]]
-    };
-    let mut lines = vec![
-        // the gaps are the way in, top left, and the way out, bottom right
-        vec![(0.0, s), (0.0, h), (w, h)],
-        vec![(w, h - s), (w, 0.0), (0.0, 0.0)],
-    ];
-    lines.extend(arrow((-m * 0.85, s / 2.0), (-m * 0.15, s / 2.0)));
-    lines.extend(arrow((w + m * 0.15, h - s / 2.0), (w + m * 0.85, h - s / 2.0)));
-    lines
-}
-
-/// The frame's labels: text, position (maze coordinates, baseline), size
-/// and anchor (0 start, 1 middle, 2 end).
-fn frame_labels(grid: &Grid, id: &str, w: f64, h: f64, s: f64, m: f64) -> Vec<(String, Point, f64, u8)> {
-    let small = (m * 0.22).clamp(7.0, 12.0);
-    let footer = (m * 0.26).clamp(8.0, 14.0);
-    let gap = small * 0.6;
-    vec![
-        ("START".to_owned(), (-m * 0.85, s / 2.0 - gap), small, 0),
-        ("FINISH".to_owned(), (w + m * 0.85, h - s / 2.0 - gap), small, 2),
-        ("weave maze".to_owned(), (0.0, h + m * 0.55), footer, 0),
-        (format!("No. {id}"), (w / 2.0, h + m * 0.55), footer, 1),
-        (format!("{} \u{d7} {}", grid.width(), grid.height()), (w, h + m * 0.55), footer, 2),
-    ]
-}
-
-fn xml_escape(text: &str) -> String {
-    text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
-}
-
-/// The frame's line: heavier than the walls, but never much more than a
-/// tenth of a cell.
-fn frame_width(line: f64, s: f64) -> f64 {
-    (line * 2.5).min(s * 0.1).max(line)
-}
-
-fn arrow_width(line: f64, s: f64) -> f64 {
-    (line * 1.2).min(s * 0.06).max(line * 0.6)
-}
-
-/// Draw the frame, arrows and footer, if the style has them.
-pub(crate) fn svg_frame(out: &mut String, grid: &Grid, s: f64, line: f64, colour: Colour, style: &Style) {
-    let Some(id) = &style.frame else { return };
-    let (w, h) = (grid.width() as f64 * s, grid.height() as f64 * s);
-    let m = svg_margin(s);
-    let colour = colour.hex();
-    write!(
-        out,
-        r#"<g fill="none" stroke="{colour}" stroke-linecap="round" stroke-linejoin="round"><path stroke-width=""#
-    )
-    .expect("writing to a String cannot fail");
-    push_fixed_trimmed(out, frame_width(line, s), 2);
-    out.push_str(r#"" d=""#);
-    let lines = frame_lines(w, h, s, m);
-    for line in &lines[..2] {
-        polyline_chain(line).push_svg(out);
-    }
-    out.push_str(r#""/><path stroke-width=""#);
-    push_fixed_trimmed(out, arrow_width(line, s), 2);
-    out.push_str(r#"" d=""#);
-    for line in &lines[2..] {
-        polyline_chain(line).push_svg(out);
-    }
-    write!(out, r#""/></g><g fill="{colour}" font-family="Helvetica, Arial, sans-serif">"#)
-        .expect("writing to a String cannot fail");
-    for (text, (x, y), size, anchor) in frame_labels(grid, id, w, h, s, m) {
-        let anchor = ["start", "middle", "end"][usize::from(anchor)];
-        out.push_str(r#"<text x=""#);
-        push_fixed_trimmed(out, x, 2);
-        out.push_str(r#"" y=""#);
-        push_fixed_trimmed(out, y, 2);
-        out.push_str(r#"" font-size=""#);
-        push_fixed_trimmed(out, size, 2);
-        write!(out, r#"" text-anchor="{anchor}" letter-spacing="0.06em">{}</text>"#, xml_escape(&text))
-            .expect("writing to a String cannot fail");
-    }
-    out.push_str("</g>");
-}
-
-/// The page layout, with room for the frame if there is one.
-pub(crate) fn pdf_layout(grid: &Grid, options: &PdfOptions, style: &Style) -> PageLayout {
-    if style.frame.is_some() {
-        PageLayout::with_margins(grid, options, 54.0, 66.0)
-    } else {
-        PageLayout::new(grid, options)
-    }
-}
-
-/// The transform that draws the maze top down, as in the SVG, on the page.
-pub(crate) fn pdf_flip(out: &mut String, grid: &Grid, layout: &PageLayout) {
-    out.push_str("1 0 0 -1 ");
-    push_fixed_trimmed(out, layout.left_margin, 3);
-    out.push(' ');
-    push_fixed_trimmed(out, layout.top_margin + grid.height() as f64 * layout.s, 3);
-    out.push_str(" cm\n");
-}
-
-/// Paint the page's background, if the style has one.
-pub(crate) fn pdf_background(out: &mut String, layout: &PageLayout, style: &Style) {
-    if let Some(background) = style.background {
-        background.push_pdf(out, "rg");
-        out.push_str("0 0 ");
-        push_fixed_trimmed(out, layout.page_width, 3);
-        out.push(' ');
-        push_fixed_trimmed(out, layout.page_height, 3);
-        out.push_str(" re f\n");
-    }
-}
-
-/// A rough width of `text` in Helvetica, in units of the font size.
-fn helvetica_width(text: &str) -> f64 {
-    text.chars()
-        .map(|c| match c {
-            ' ' | '.' | ',' | 'i' | 'l' | 'j' | 't' | 'f' | 'I' => 0.28,
-            'm' | 'w' | 'M' | 'W' => 0.83,
-            c if c.is_ascii_uppercase() => 0.67,
-            _ => 0.556,
-        })
-        .sum()
-}
-
-/// A string in PDF syntax, in WinAnsi (× is octal 327).
-fn pdf_string(text: &str) -> String {
-    let mut out = String::from("(");
-    for c in text.chars() {
-        match c {
-            '(' | ')' | '\\' => {
-                out.push('\\');
-                out.push(c);
-            }
-            '\u{d7}' => out.push_str("\\327"),
-            c if c.is_ascii() && !c.is_ascii_control() => out.push(c),
-            _ => out.push('?'),
-        }
-    }
-    out.push(')');
-    out
-}
-
-/// Draw the frame, arrows and footer, if the style has them. Must be
-/// called outside the flipped maze transform.
-pub(crate) fn pdf_frame(out: &mut String, grid: &Grid, layout: &PageLayout, line: f64, colour: Colour, style: &Style) {
-    let Some(id) = &style.frame else { return };
-    let s = layout.s;
-    let (w, h) = (grid.width() as f64 * s, grid.height() as f64 * s);
-    let m = layout.left_margin.min(54.0) * 0.9;
-    out.push_str("q\n");
-    pdf_flip(out, grid, layout);
-    colour.push_pdf(out, "RG");
-    out.push_str("1 J 1 j\n");
-    let lines = frame_lines(w, h, s, m);
-    for (group, width) in [(&lines[..2], frame_width(line, s)), (&lines[2..], arrow_width(line, s))] {
-        push_fixed_trimmed(out, width, 3);
-        out.push_str(" w\n");
-        for line in group {
-            polyline_chain(line).push_pdf(out);
-        }
-        out.push_str("S\n");
-    }
-    out.push_str("Q\n");
-    colour.push_pdf(out, "rg");
-    let top = layout.top_margin + h;
-    for (text, (x, y), size, anchor) in frame_labels(grid, id, w, h, s, m) {
-        let width = helvetica_width(&text) * size;
-        let x = layout.left_margin + x - width * f64::from(anchor) / 2.0;
-        out.push_str("BT /F1 ");
-        push_fixed_trimmed(out, size, 2);
-        out.push_str(" Tf ");
-        push_fixed_trimmed(out, x, 3);
-        out.push(' ');
-        push_fixed_trimmed(out, top - y, 3);
-        writeln!(out, " Td {} Tj ET", pdf_string(&text)).expect("writing to a String cannot fail");
-    }
-}
-
-/// A complete single-page PDF from its content stream and its Form XObjects
-/// (named `/T<cell>`, drawn in tile coordinates for cells of side `s`).
-pub(crate) fn pdf_document(content: &str, layout: &PageLayout, forms: &[(u8, String)]) -> Vec<u8> {
-    let stream = zlib_compress(content.as_bytes());
-    let date = pdf_date();
-    let mut media_box = String::from("0 0 ");
-    push_fixed_trimmed(&mut media_box, layout.page_width, 3);
-    media_box.push(' ');
-    push_fixed_trimmed(&mut media_box, layout.page_height, 3);
-
-    // the forms follow the page's own objects, from object 7
-    let s = layout.s;
-    let mut bbox = String::new();
-    for v in [-s, -s, 2.0 * s, 2.0 * s] {
-        push_fixed_trimmed(&mut bbox, v, 3);
-        bbox.push(' ');
-    }
-    let mut x_objects = String::new();
-    let mut form_objects = Vec::with_capacity(forms.len());
-    for (k, (cell, stream)) in forms.iter().enumerate() {
-        write!(x_objects, " /T{cell} {} 0 R", k + 7).expect("writing to a String cannot fail");
-        form_objects.push(format!(
-            "<<\n/BBox [ {bbox}] /FormType 1 /Length {} /Resources <<\n>> /Subtype /Form /Type /XObject\n>>\nstream\n{stream}\nendstream",
-            stream.len()
-        ));
-    }
-    let page = format!(
-        "<<\n/Contents 5 0 R /MediaBox [ {media_box} ] /Parent 2 0 R /Resources <<\n/Font << /F1 6 0 R >> /XObject <<{x_objects} >>\n>> /Type /Page\n>>"
-    );
-    let info = format!(
-        "<<\n/Author (Dale O'Brien) /CreationDate ({date}) /Creator (maze-rs) /ModDate ({date}) /Producer (maze-rs) /Title (Maze)\n>>"
-    );
-    let contents = [
-        format!("<<\n/Filter /FlateDecode /Length {}\n>>\nstream\n", stream.len()).as_bytes(),
-        &stream,
-        b"\nendstream",
-    ]
-    .concat();
-    let mut objects: Vec<&[u8]> = vec![
-        b"<<\n/Pages 2 0 R /Type /Catalog\n>>",
-        b"<<\n/Count 1 /Kids [ 3 0 R ] /Type /Pages\n>>",
-        page.as_bytes(),
-        info.as_bytes(),
-        &contents,
-        b"<<\n/BaseFont /Helvetica /Encoding /WinAnsiEncoding /Name /F1 /Subtype /Type1 /Type /Font\n>>",
-    ];
-    objects.extend(form_objects.iter().map(String::as_bytes));
-
-    let mut out: Vec<u8> = b"%PDF-1.4\n%\x93\x8c\x8b\x9e maze-rs generated PDF document\n".to_vec();
-    let mut offsets = Vec::with_capacity(objects.len());
-    for (i, body) in objects.iter().enumerate() {
-        offsets.push(out.len());
-        out.extend_from_slice(format!("{} 0 obj\n", i + 1).as_bytes());
-        out.extend_from_slice(body);
-        out.extend_from_slice(b"\nendobj\n");
-    }
-    let xref = out.len();
-    let size = objects.len() + 1;
-    let mut table = format!("xref\n0 {size}\n0000000000 65535 f \n");
-    for offset in offsets {
-        writeln!(table, "{offset:010} 00000 n ").expect("writing to a String cannot fail");
-    }
-    write!(table, "trailer\n<<\n/Info 4 0 R\n/Root 1 0 R\n/Size {size}\n>>\nstartxref\n{xref}\n%%EOF\n")
-        .expect("writing to a String cannot fail");
-    out.extend_from_slice(table.as_bytes());
-    out
-}
-
 // ---- the styled renderers ----
 
 const WALL: Colour = Colour([0, 0, 0]);
 const SOLUTION: Colour = Colour([0xE5, 0x19, 0x19]);
 
-/// Parse SVG path data written by this crate (`M`, `L` and `A` commands)
-/// back into chains.
-fn parse_path(d: &str) -> Vec<Chain> {
-    let mut chains: Vec<Chain> = Vec::new();
-    let mut command = b'M';
-    let mut numbers: Vec<f64> = Vec::with_capacity(7);
-    let bytes = d.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        let c = bytes[i];
-        if c.is_ascii_alphabetic() {
-            command = c;
-            numbers.clear();
-            i += 1;
-        } else if c == b'-' || c == b'.' || c.is_ascii_digit() {
-            let start = i;
-            i += 1;
-            while i < bytes.len() && (bytes[i] == b'.' || bytes[i].is_ascii_digit()) {
-                i += 1;
-            }
-            numbers.push(d[start..i].parse().expect("the renderer writes plain numbers"));
-            let needed = if command == b'A' { 7 } else { 2 };
-            if numbers.len() == needed {
-                let to = (numbers[needed - 2], numbers[needed - 1]);
-                match (command, chains.last_mut()) {
-                    (b'M', _) | (_, None) => chains.push(Chain { start: to, segments: Vec::new() }),
-                    (b'A', Some(chain)) => chain.segments.push(Segment::Arc {
-                        radius: numbers[0],
-                        large: numbers[3] != 0.0,
-                        sweep: numbers[4] != 0.0,
-                        to,
-                    }),
-                    (_, Some(chain)) => chain.segments.push(Segment::Line(to)),
-                }
-                numbers.clear();
-            }
-        } else {
-            i += 1;
-        }
-    }
-    chains
-}
-
 /// How wide the solution is drawn, for walls `line` wide and cells of side `s`.
 fn solution_width(style: &Style, line: f64, s: f64) -> f64 {
-    (line * 2.5).min(style.corridor.unwrap_or(0.6) * s * 0.5)
+    (line * 2.5).min(style.corridor.unwrap_or(CORRIDOR) * s * 0.5)
 }
 
 /// Render the maze (and optionally its solution) as an SVG in a style.
@@ -769,114 +356,123 @@ pub fn styled_svg(
     grid: &Grid,
     page: PageSize,
     draw_with_curves: bool,
-    solution: Option<&[(isize, isize)]>,
+    solution: Option<Solution>,
     style: &Style,
 ) -> String {
     let (width, s) = svg_scale(grid, page);
     let (w, h) = (width * s, grid.height() as f64 * s);
-    let line = style.line.unwrap_or(2.0);
-    let wall = style.wall_colour.unwrap_or(WALL);
-    let path_colour = style.solution_colour.unwrap_or(SOLUTION).hex();
-    let curves = style.corners.map_or(draw_with_curves, |c| c == Corners::Round);
-    let data = path_data(grid, s, curves, solution);
+    let Pens { line, wall, solution: path_colour } = style.pens(Pens { line: 2.0, wall: WALL, solution: SOLUTION });
+    let path_colour = path_colour.hex();
+    let traces = Traces::new(grid, s, style.curves(draw_with_curves), solution);
 
     let mut out = String::new();
     svg_open(&mut out, w, h, s, style);
-    let tiles = style.tiles(s, draw_with_curves);
-    let mut used = [false; 32];
-    for j in 0..grid.height() {
-        for (i, &cell) in grid.row(j).iter().enumerate() {
-            used[usize::from(cell)] |= !is_dot(grid, i, j);
-        }
-    }
+    let used = used_tiles(grid, |i, j| is_dot(grid, i, j));
     out.push_str("<defs>");
-    for cell in (0..32).filter(|&c| used[c]) {
-        write!(out, r#"<path id="t{cell}" d="{}"/>"#, tiles[cell]).expect("writing to a String cannot fail");
+    for (cell, chains) in style.tiles(s, draw_with_curves, &used).iter().enumerate().filter(|&(c, _)| used[c]) {
+        w!(out, r#"<path id="t{cell}" d=""#);
+        for chain in chains {
+            chain.push_svg(&mut out);
+        }
+        out.push_str(r#""/>"#);
     }
-    write!(out, r#"</defs><g fill="none" stroke="{}" stroke-width=""#, wall.hex())
-        .expect("writing to a String cannot fail");
+    w!(out, r#"</defs><g fill="none" stroke="{}" stroke-width=""#, wall.hex());
     push_fixed_trimmed(&mut out, line, 2);
     out.push_str(r#"" stroke-linecap="round" stroke-linejoin="round">"#);
-    for j in 0..grid.height() {
-        for (i, &cell) in grid.row(j).iter().enumerate() {
-            if !is_dot(grid, i, j) {
-                write!(out, r##"<use href="#t{cell}" x=""##).expect("writing to a String cannot fail");
-                push_fixed_trimmed(&mut out, i as f64 * s, 2);
-                out.push_str(r#"" y=""#);
-                push_fixed_trimmed(&mut out, j as f64 * s, 2);
-                out.push_str(r#""/>"#);
-            }
-        }
-    }
+    push_uses(&mut out, grid, s);
     out.push_str("</g>");
-    for &(cx, cy, r) in &data.dots {
+    for (cx, cy, r) in dots(grid, s) {
         out.push_str(r#"<circle cx=""#);
         push_fixed_trimmed(&mut out, cx, 2);
         out.push_str(r#"" cy=""#);
         push_fixed_trimmed(&mut out, cy, 2);
         out.push_str(r#"" r=""#);
         push_fixed_trimmed(&mut out, r, 2);
-        write!(out, r#"" fill="{path_colour}"/>"#).expect("writing to a String cannot fail");
+        w!(out, r#"" fill="{path_colour}"/>"#);
     }
-    if !data.over.is_empty() {
+    if !traces.over.is_empty() {
         let width = solution_width(style, line, s);
-        write!(
+        w!(
             out,
             r#"<g fill="none" stroke="{path_colour}" stroke-linecap="round" stroke-linejoin="round" stroke-width=""#
-        )
-        .expect("writing to a String cannot fail");
+        );
         push_fixed_trimmed(&mut out, width, 2);
-        write!(
+        w!(
             out,
             r#""><path d="{}"/><path stroke-opacity="0.3" d="{}"/></g>"#,
-            data.over.trim_end(),
-            data.under.trim_end()
-        )
-        .expect("writing to a String cannot fail");
+            traces.over.trim_end(),
+            traces.under.trim_end()
+        );
     }
     svg_frame(&mut out, grid, s, line, wall, style);
     out.push_str("</svg>");
     out
 }
 
-/// Append a filled circle to a PDF content stream.
-fn push_pdf_circle(out: &mut String, (cx, cy): Point, r: f64) {
-    let start = (cx + r, cy);
-    push_pdf_xy(out, start);
-    out.push_str(" m\n");
-    push_pdf_arc(out, start, (cx - r, cy), r, false, true);
-    push_pdf_arc(out, (cx - r, cy), start, r, false, true);
-    out.push_str("f\n");
+/// Append a `q ... cm /T<cell> Do Q` line drawing its tile for every cell
+/// but the start and end, with cells of side `s`.
+fn push_form_cells(out: &mut String, grid: &Grid, s: f64) {
+    // the start of each column's line, the y of each row, and the end of the
+    // line for each kind of tile
+    let column_head: Vec<Piece> = (0..grid.width())
+        .map(|i| {
+            let mut head = String::from("q 1 0 0 1 ");
+            push_fixed_trimmed(&mut head, i as f64 * s, 3);
+            head.push(' ');
+            Piece::new(&head)
+        })
+        .collect();
+    let row_y: Vec<Piece> = (0..grid.height())
+        .map(|j| {
+            let mut y = String::new();
+            push_fixed_trimmed(&mut y, j as f64 * s, 3);
+            Piece::new(&y)
+        })
+        .collect();
+    let tail: Vec<Piece> = (0..TILE_KINDS).map(|cell| Piece::new(&format!(" cm /T{cell} Do Q\n"))).collect();
+
+    // rows are independent, so bands of them are written in parallel
+    let bands = map_bands(grid.height(), grid.width(), |rows| {
+        let mut band = String::with_capacity(rows.len() * grid.width() * 36);
+        for j in rows {
+            for (i, &cell) in grid.row(j).iter().enumerate() {
+                if !is_dot(grid, i, j) {
+                    column_head[i].push_to(&mut band);
+                    row_y[j].push_to(&mut band);
+                    tail[usize::from(cell)].push_to(&mut band);
+                }
+            }
+        }
+        band
+    });
+    out.reserve(bands.iter().map(String::len).sum());
+    for band in bands {
+        out.push_str(&band);
+    }
 }
 
 /// Render the maze (and optionally its solution) as a PDF in a style. The
 /// maze is drawn top down, as in the SVG, with the start at the top left.
 #[must_use]
-pub fn styled_pdf(grid: &Grid, options: &PdfOptions, solution: Option<&[(isize, isize)]>, style: &Style) -> Vec<u8> {
+pub fn styled_pdf(grid: &Grid, options: &PdfOptions, solution: Option<Solution>, style: &Style) -> Vec<u8> {
     let layout = pdf_layout(grid, options, style);
     let s = layout.s;
-    let line = style.line.unwrap_or(s / 7.0);
-    let wall = style.wall_colour.unwrap_or(WALL);
-    let path_colour = style.solution_colour.unwrap_or(SOLUTION);
-    let curves = style.corners.map_or(options.draw_with_curves, |c| c == Corners::Round);
-    let data = path_data(grid, s, curves, solution);
+    let Pens { line, wall, solution: path_colour } = style.pens(Pens { line: s / 7.0, wall: WALL, solution: SOLUTION });
+    let traces = Traces::new(grid, s, style.curves(options.draw_with_curves), solution);
 
-    let tiles = style.tiles(s, options.draw_with_curves);
-    let mut used = [false; 32];
-    for j in 0..grid.height() {
-        for (i, &cell) in grid.row(j).iter().enumerate() {
-            used[usize::from(cell)] |= !is_dot(grid, i, j);
-        }
-    }
-    let forms: Vec<(u8, String)> = (0..32u8)
-        .filter(|&c| used[usize::from(c)])
-        .map(|cell| {
+    let used = used_tiles(grid, |i, j| is_dot(grid, i, j));
+    let forms: Vec<(u8, String)> = style
+        .tiles(s, options.draw_with_curves, &used)
+        .iter()
+        .enumerate()
+        .filter(|&(cell, _)| used[cell])
+        .map(|(cell, chains)| {
             let mut stream = String::new();
-            for chain in parse_path(&tiles[usize::from(cell)]) {
+            for chain in chains {
                 chain.push_pdf(&mut stream);
             }
             stream.push('S');
-            (cell, stream)
+            (cell as u8, stream)
         })
         .collect();
 
@@ -888,35 +484,25 @@ pub fn styled_pdf(grid: &Grid, options: &PdfOptions, solution: Option<&[(isize, 
     wall.push_pdf(&mut out, "RG");
     push_fixed_trimmed(&mut out, line, 3);
     out.push_str(" w\n");
-    for j in 0..grid.height() {
-        for (i, &cell) in grid.row(j).iter().enumerate() {
-            if !is_dot(grid, i, j) {
-                out.push_str("q 1 0 0 1 ");
-                push_pdf_xy(&mut out, (i as f64 * s, j as f64 * s));
-                writeln!(out, " cm /T{cell} Do Q").expect("writing to a String cannot fail");
-            }
-        }
-    }
+    push_form_cells(&mut out, grid, s);
     path_colour.push_pdf(&mut out, "rg");
     path_colour.push_pdf(&mut out, "RG");
-    for &(cx, cy, r) in &data.dots {
+    for (cx, cy, r) in dots(grid, s) {
         push_pdf_circle(&mut out, (cx, cy), r);
     }
-    if !data.over.is_empty() {
+    if !traces.over.is_empty() {
         let width = solution_width(style, line, s);
         push_fixed_trimmed(&mut out, width, 3);
         out.push_str(" w\n");
-        for chain in parse_path(&data.over) {
+        for chain in parse_path(&traces.over) {
             chain.push_pdf(&mut out);
         }
         out.push_str("S\n");
         // PDF has no simple transparency, so the parts under bridges are dashed
         out.push('[');
-        push_fixed_trimmed(&mut out, width * 0.2, 3);
-        out.push(' ');
-        push_fixed_trimmed(&mut out, width * 1.6, 3);
+        push_pdf_xy(&mut out, (width * 0.2, width * 1.6));
         out.push_str("] 0 d\n");
-        for chain in parse_path(&data.under) {
+        for chain in parse_path(&traces.under) {
             chain.push_pdf(&mut out);
         }
         out.push_str("S\n[] 0 d\n");
@@ -955,9 +541,9 @@ mod tests {
         for corners in [Corners::Round, Corners::Bevel, Corners::Square] {
             for dead_ends in [DeadEnds::Bulb, DeadEnds::Round, DeadEnds::Flat] {
                 let style = Style { corners: Some(corners), dead_ends: Some(dead_ends), ..Style::default() };
-                let tiles = style.tiles(30.0, true);
-                for (cell, d) in tiles.iter().enumerate().take(16).skip(1) {
-                    assert!(!d.is_empty(), "{corners:?} {dead_ends:?} {cell}");
+                let tiles = style.tiles(30.0, true, &[true; TILE_KINDS]);
+                for (cell, chains) in tiles.iter().enumerate().take(16).skip(1) {
+                    assert!(!chains.is_empty(), "{corners:?} {dead_ends:?} {cell}");
                 }
             }
         }
