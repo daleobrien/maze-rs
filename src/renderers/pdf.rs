@@ -13,8 +13,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use flate2::write::ZlibEncoder;
 use flate2::{Compress, Compression, FlushCompress, Status};
 
-use crate::maze::Grid;
-use crate::renderers::{map_bands, page_size, push_fixed_trimmed, Geometry, PageSize, Piece};
+use crate::maze::{Grid, CROSS_EW, CROSS_NS};
+use crate::renderers::{map_bands, page_size, push_fixed_trimmed, used_tiles, Geometry, PageSize, Piece, TILE_KINDS};
 use crate::simd::adler32;
 
 /// ReportLab's `fp_str` for a single number, appended to `out`.
@@ -474,7 +474,7 @@ impl Tiles {
                 self.s_shape_01(&mut p);
                 self.s_shape_11(&mut p);
             }
-            19 => {
+            CROSS_NS => {
                 // ┤ ├
                 // ┤ ├
                 p.move_to(a, s);
@@ -492,7 +492,7 @@ impl Tiles {
                 p.move_to(s, b);
                 p.line_to(b, b);
             }
-            28 => {
+            CROSS_EW => {
                 // ┴─┴
                 // ┬─┬
                 p.move_to(0.0, b);
@@ -605,13 +605,8 @@ pub fn pdf_content(grid: &Grid, options: &PdfOptions) -> PageContent {
     // a tile is drawn relative to its own cell, so every cell of the same
     // kind has the same path: it is written once, as a Form XObject, and each
     // cell of that kind moves there and draws it with `Do`
-    let mut used = [false; 32];
-    for j in 0..height {
-        for (i, &cell) in grid.row(j).iter().enumerate() {
-            used[usize::from(cell)] |= is_marked(i, j) == (false, false);
-        }
-    }
-    let forms: Vec<TileForm> = (0..32u8)
+    let used = used_tiles(grid, |i, j| is_marked(i, j) != (false, false));
+    let forms: Vec<TileForm> = (0..TILE_KINDS as u8)
         .filter(|&cell| used[usize::from(cell)])
         .map(|cell| TileForm { cell, stream: tiles.path(cell, false, false).code + "\nS" })
         .collect();
@@ -622,7 +617,7 @@ pub fn pdf_content(grid: &Grid, options: &PdfOptions) -> PageContent {
     let mut step = String::from("\n1 0 0 1 ");
     push_fp_num(&mut step, s);
     step.push_str(" 0 cm");
-    let draw_form: Vec<String> = (0..32).map(|cell| format!("\n/T{cell} Do")).collect();
+    let draw_form: Vec<String> = (0..TILE_KINDS).map(|cell| format!("\n/T{cell} Do")).collect();
     let step_and_draw: Vec<Piece> =
         draw_form.iter().map(|draw| Piece::new(&format!("{step} {}", &draw[1..]))).collect();
 
@@ -686,7 +681,7 @@ const PARALLEL_COMPRESS_MIN_BYTES: usize = 1 << 17;
 /// Large inputs are split into pieces that are deflated in parallel, each
 /// ending on a byte boundary (a sync flush), so the pieces join into one
 /// ordinary zlib stream, as `pigz` does.
-pub(crate) fn zlib_compress(data: &[u8]) -> Vec<u8> {
+fn zlib_compress(data: &[u8]) -> Vec<u8> {
     if data.len() < PARALLEL_COMPRESS_MIN_BYTES {
         let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
         encoder.write_all(data).expect("writing to a Vec cannot fail");
@@ -768,9 +763,6 @@ pub(crate) fn pdf_date() -> String {
 #[must_use]
 pub fn pdf_render(grid: &Grid, options: &PdfOptions) -> Vec<u8> {
     let content = pdf_content(grid, options);
-
-    let stream = zlib_compress(content.stream.as_bytes());
-
     let date = pdf_date();
     let media_box = fp_str(&[0.0, 0.0, content.width, content.height]);
     // the tile forms follow the page's own objects, from object 8
@@ -779,7 +771,7 @@ pub fn pdf_render(grid: &Grid, options: &PdfOptions) -> Vec<u8> {
     let mut x_objects = String::new();
     let mut forms = Vec::with_capacity(content.forms.len());
     for (k, form) in content.forms.iter().enumerate() {
-        write!(x_objects, " /T{} {} 0 R", form.cell, k + 8).expect("writing to a String cannot fail");
+        w!(x_objects, " /T{} {} 0 R", form.cell, k + 8);
         // a tile is a few hundred bytes, too few for compressing to pay
         forms.push(format!(
             "<<\n/BBox [ {bbox} ] /FormType 1 /Length {} /Matrix [ 1 0 0 1 0 0 ] /Resources <<\n\n>> /Subtype /Form /Type /XObject\n>>\nstream\n{}\nendstream",
@@ -793,12 +785,7 @@ pub fn pdf_render(grid: &Grid, options: &PdfOptions) -> Vec<u8> {
     let info = format!(
         "<<\n/Author (Dale O'Brien) /CreationDate ({date}) /Creator (maze-rs) /Keywords () /ModDate ({date}) /Producer (maze-rs) /Subject () /Title (Maze) /Trapped /False\n>>"
     );
-    let contents = [
-        format!("<<\n/Filter /FlateDecode /Length {}\n>>\nstream\n", stream.len()).as_bytes(),
-        &stream,
-        b"\nendstream",
-    ]
-    .concat();
+    let contents = flate_stream_object(&content.stream);
     let mut objects: Vec<&[u8]> = vec![
         b"<<\n/F1 2 0 R\n>>",
         b"<<\n/BaseFont /Helvetica /Encoding /WinAnsiEncoding /Name /F1 /Subtype /Type1 /Type /Font\n>>",
@@ -809,8 +796,22 @@ pub fn pdf_render(grid: &Grid, options: &PdfOptions) -> Vec<u8> {
         &contents,
     ];
     objects.extend(forms.iter().map(String::as_bytes));
+    write_pdf("1.3", &objects, 4, 5)
+}
 
-    let mut out: Vec<u8> = b"%PDF-1.3\n%\x93\x8c\x8b\x9e maze-rs generated PDF document\n".to_vec();
+/// A content stream, compressed, as a PDF stream object.
+pub(crate) fn flate_stream_object(content: &str) -> Vec<u8> {
+    let stream = zlib_compress(content.as_bytes());
+    [format!("<<\n/Filter /FlateDecode /Length {}\n>>\nstream\n", stream.len()).as_bytes(), &stream, b"\nendstream"]
+        .concat()
+}
+
+/// A PDF file of the given `version` from its objects, numbered from 1,
+/// with the cross-reference table and a trailer naming the `root` (catalog)
+/// and `info` objects.
+pub(crate) fn write_pdf(version: &str, objects: &[&[u8]], root: usize, info: usize) -> Vec<u8> {
+    let mut out = format!("%PDF-{version}\n").into_bytes();
+    out.extend_from_slice(b"%\x93\x8c\x8b\x9e maze-rs generated PDF document\n");
     let mut offsets = Vec::with_capacity(objects.len());
     for (i, body) in objects.iter().enumerate() {
         offsets.push(out.len());
@@ -821,12 +822,12 @@ pub fn pdf_render(grid: &Grid, options: &PdfOptions) -> Vec<u8> {
 
     let xref = out.len();
     let size = objects.len() + 1;
-    write!(out, "xref\n0 {size}\n0000000000 65535 f \n").expect("writing to a Vec cannot fail");
+    let mut table = format!("xref\n0 {size}\n0000000000 65535 f \n");
     for offset in offsets {
-        writeln!(out, "{offset:010} 00000 n ").expect("writing to a Vec cannot fail");
+        w!(table, "{offset:010} 00000 n \n");
     }
-    write!(out, "trailer\n<<\n/Info 5 0 R\n/Root 4 0 R\n/Size {size}\n>>\nstartxref\n{xref}\n%%EOF\n")
-        .expect("writing to a Vec cannot fail");
+    w!(table, "trailer\n<<\n/Info {info} 0 R\n/Root {root} 0 R\n/Size {size}\n>>\nstartxref\n{xref}\n%%EOF\n");
+    out.extend_from_slice(table.as_bytes());
     out
 }
 

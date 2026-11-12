@@ -2,11 +2,42 @@ use std::fmt::Write as _;
 use std::num::NonZeroUsize;
 use std::ops::Range;
 
+use crate::maze::Grid;
+
+/// `write!` to a `String`, which cannot fail.
+macro_rules! w {
+    ($($arg:tt)*) => {
+        write!($($arg)*).expect("writing to a String cannot fail")
+    };
+}
+
+mod frame;
 pub mod ink;
+mod path;
 pub mod pdf;
 pub mod style;
 pub mod svg;
 pub mod text;
+
+/// A maze's solution: the cells along it as `(x, y)`, from the start to the
+/// end, skipping crossings it passes over or under.
+pub type Solution<'a> = &'a [(isize, isize)];
+
+/// Cell values are below this, so a table indexed by cell has this many
+/// entries.
+pub(crate) const TILE_KINDS: usize = 32;
+
+/// Which kinds of tile the maze has, leaving out the cells `skip` picks
+/// (the start and end, which are drawn another way).
+pub(crate) fn used_tiles(grid: &Grid, skip: impl Fn(usize, usize) -> bool) -> [bool; TILE_KINDS] {
+    let mut used = [false; TILE_KINDS];
+    for j in 0..grid.height() {
+        for (i, &cell) in grid.row(j).iter().enumerate() {
+            used[usize::from(cell)] |= !skip(i, j);
+        }
+    }
+    used
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum PageSize {
@@ -151,6 +182,13 @@ pub fn push_fixed_trimmed(out: &mut String, x: f64, digits: usize) -> f64 {
     push_fixed_impl(out, x, digits, true)
 }
 
+/// Append a point as two [`push_fixed_trimmed`] numbers with a space between.
+pub(crate) fn push_pair(out: &mut String, (x, y): (f64, f64), digits: usize) {
+    push_fixed_trimmed(out, x, digits);
+    out.push(' ');
+    push_fixed_trimmed(out, y, digits);
+}
+
 fn push_fixed_impl(out: &mut String, x: f64, digits: usize, trim: bool) -> f64 {
     const POW10: [u64; 7] = [1, 10, 100, 1_000, 10_000, 100_000, 1_000_000];
     // beyond this the scaled value might not fit in 53 bits
@@ -231,7 +269,7 @@ fn push_fixed_impl(out: &mut String, x: f64, digits: usize, trim: bool) -> f64 {
 
 fn push_fixed_slow(out: &mut String, x: f64, digits: usize, trim: bool) -> f64 {
     let start = out.len();
-    write!(out, "{x:.digits$}").expect("writing to a String cannot fail");
+    w!(out, "{x:.digits$}");
     if trim && out[start..].contains('.') {
         while out.ends_with('0') {
             out.pop();

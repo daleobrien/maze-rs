@@ -5,7 +5,10 @@ use std::f64::consts::PI;
 use std::fmt::Write as _;
 
 use crate::maze::{Grid, CROSS_EW, CROSS_NS};
-use crate::renderers::{map_bands, page_size, push_fixed_trimmed, py_float_repr, Geometry, PageSize, Piece};
+use crate::renderers::{
+    map_bands, page_size, push_fixed_trimmed, py_float_repr, used_tiles, Geometry, PageSize, Piece, Solution,
+    TILE_KINDS,
+};
 
 const QUARTER: f64 = PI / 2.0;
 const HALF: f64 = PI;
@@ -57,7 +60,7 @@ impl ArcShape {
         push_round(&mut middle, radius);
         middle.push(' ');
         push_round(&mut middle, radius);
-        write!(middle, " 0 {large} {dir} ").expect("writing to a String cannot fail");
+        w!(middle, " 0 {large} {dir} ");
 
         ArcShape { start: (radius * s.cos(), radius * s.sin()), end: (radius * e.cos(), radius * e.sin()), middle }
     }
@@ -96,12 +99,10 @@ struct Arcs {
     ca: ArcShape,
 }
 
+/// Path data being drawn: a tile's walls, or the solution.
 struct SvgPath {
     svg: String,
-    dots: String,
-    colour: &'static str,
-    stroke_width: u32,
-    opacity: &'static str,
+    /// Whether this is the faint part of the solution, under crossings.
     faint: bool,
     draw_with_curves: bool,
 
@@ -121,14 +122,7 @@ struct SvgPath {
 }
 
 impl SvgPath {
-    fn new(
-        colour: &'static str,
-        stroke_width: u32,
-        opacity: &'static str,
-        s: f64,
-        draw_with_curves: bool,
-        faint: bool,
-    ) -> Self {
+    fn new(s: f64, draw_with_curves: bool, faint: bool) -> Self {
         let Geometry { s, g, n, r, q, v, theta } = Geometry::new(s);
         let delta = theta - PI / 2.0;
         // the radii of the small, medium and big quarter circles
@@ -171,10 +165,6 @@ impl SvgPath {
 
         SvgPath {
             svg: String::new(),
-            dots: String::new(),
-            colour,
-            stroke_width,
-            opacity,
             faint,
             draw_with_curves,
             // inside loop
@@ -192,27 +182,6 @@ impl SvgPath {
             v,
             arcs,
         }
-    }
-
-    /// Append the `<path>` element (and any dots) to `out`.
-    fn write_path(&self, out: &mut String) {
-        write!(
-            out,
-            r#"<path stroke-opacity="{}" stroke-width="{}" stroke="{}" d="{}" /> {}"#,
-            self.opacity, self.stroke_width, self.colour, self.svg, self.dots
-        )
-        .expect("writing to a String cannot fail");
-    }
-
-    fn dot(&mut self, x: f64, y: f64) {
-        let out = &mut self.dots;
-        out.push_str(r#"<circle cx=""#);
-        push_round(out, x + self.s2);
-        out.push_str(r#"" cy=""#);
-        push_round(out, y + self.s2);
-        out.push_str(r#"" r=""#);
-        push_round(out, self.s / 3.0);
-        out.push_str(r##"" fill-opacity="1.0" stroke-opacity="0" fill="#E51919" />"##);
     }
 
     /// Append a command and its point, e.g. `M 1.5 2 `.
@@ -278,7 +247,7 @@ impl SvgPath {
         }
     }
 
-    fn render_trace(&mut self, grid: &Grid, trail: &[(isize, isize)]) {
+    fn render_trace(&mut self, grid: &Grid, trail: Solution) {
         let s = self.s;
         let to_page = |(x, y): (isize, isize)| (x as f64 * s, y as f64 * s);
         let count = trail.len().saturating_sub(2);
@@ -457,8 +426,8 @@ impl SvgPath {
             13 => self.cd(x, y),
             14 => self.ce(x, y),
             15 => self.cf(x, y),
-            19 => self.cg(x, y),
-            28 => self.ch(x, y),
+            CROSS_NS => self.cg(x, y),
+            CROSS_EW => self.ch(x, y),
             _ => panic!("no svg tile for cell {cell}"),
         }
     }
@@ -720,40 +689,28 @@ pub(crate) fn svg_scale(grid: &Grid, page: PageSize) -> (f64, f64) {
     (width, page_width / width)
 }
 
-/// The maze drawn as SVG path data, for renderers that restyle the same
-/// geometry (see `ink`).
-pub(crate) struct PathData {
-    /// The walls of each kind of tile, indexed by cell value, in the tile's
-    /// own coordinates; empty for kinds the maze doesn't use.
-    pub tiles: Vec<String>,
-    /// The start and end cells, drawn as a dot (centre and radius) instead of walls.
-    pub dots: Vec<(f64, f64, f64)>,
-    /// The solution, in page coordinates, where it is on top...
-    pub over: String,
-    /// ...and where it passes under a crossing.
-    pub under: String,
-}
-
 /// Whether cell `(i, j)` is the start or end, which get a dot instead of walls.
 pub(crate) fn is_dot(grid: &Grid, i: usize, j: usize) -> bool {
     (i, j) == (0, 0) || (i, j) == (grid.width() - 1, grid.height() - 1)
 }
 
-/// The geometry [`svg_render`] draws, with cells of side `s`.
-pub(crate) fn path_data(grid: &Grid, s: f64, draw_with_curves: bool, solution: Option<&[(isize, isize)]>) -> PathData {
-    let mut walls = SvgPath::new("#000000", 2, "1.0", s, draw_with_curves, false);
-    let mut used = [false; 32];
-    let mut dots = Vec::new();
-    for j in 0..grid.height() {
-        for (i, &cell) in grid.row(j).iter().enumerate() {
-            if is_dot(grid, i, j) {
-                dots.push((i as f64 * s + s / 2.0, j as f64 * s + s / 2.0, s / 3.0));
-            } else {
-                used[usize::from(cell)] = true;
-            }
-        }
+/// The start and end dots (centre and radius), in the order the cells come
+/// row by row, for cells of side `s`.
+pub(crate) fn dots(grid: &Grid, s: f64) -> Vec<(f64, f64, f64)> {
+    let mut cells = vec![(0, 0)];
+    let last = (grid.width() - 1, grid.height() - 1);
+    if last != (0, 0) {
+        cells.push(last);
     }
-    let tiles = (0..32u8)
+    cells.into_iter().map(|(i, j)| (i as f64 * s + s / 2.0, j as f64 * s + s / 2.0, s / 3.0)).collect()
+}
+
+/// The walls of each kind of tile marked in `used`, as SVG path data in the
+/// tile's own coordinates (each ending in a space), with cells of side `s`;
+/// empty for the kinds not used.
+pub(crate) fn plain_tiles(s: f64, draw_with_curves: bool, used: &[bool; TILE_KINDS]) -> Vec<String> {
+    let mut walls = SvgPath::new(s, draw_with_curves, false);
+    (0..TILE_KINDS as u8)
         .map(|cell| {
             walls.svg.clear();
             if used[usize::from(cell)] {
@@ -761,51 +718,42 @@ pub(crate) fn path_data(grid: &Grid, s: f64, draw_with_curves: bool, solution: O
             }
             walls.svg.clone()
         })
-        .collect();
-
-    let mut over = SvgPath::new("#E51919", 5, "1.0", s, draw_with_curves, false);
-    let mut under = SvgPath::new("#E51919", 5, "0.2", s, draw_with_curves, true);
-    if let Some(trail) = solution.filter(|s| !s.is_empty()) {
-        over.render_trace(grid, trail);
-        under.render_trace(grid, trail);
-    }
-    PathData { tiles, dots, over: over.svg, under: under.svg }
+        .collect()
 }
 
-/// Render the maze (and optionally its solution) as an SVG document.
-#[must_use]
-pub fn svg_render(grid: &Grid, page: PageSize, draw_with_curves: bool, solution: Option<&[(isize, isize)]>) -> String {
-    let (width, s) = svg_scale(grid, page);
-    let height = grid.height() as f64;
-    let stroke_width = 2;
+/// The solution as SVG path data, in page coordinates, as [`svg_render`]
+/// draws it.
+pub(crate) struct Traces {
+    /// Whether there is a solution to draw (though one of fewer than three
+    /// cells draws nothing).
+    pub solved: bool,
+    /// Where the solution is on top...
+    pub over: String,
+    /// ...and where it passes under a crossing.
+    pub under: String,
+}
 
-    let mut walls = SvgPath::new("#000000", stroke_width, "1.0", s, draw_with_curves, false); // Maze walls
-    let mut over_trace = SvgPath::new("#E51919", 5, "1.0", s, draw_with_curves, false); // solution
-    let mut under_trace = SvgPath::new("#E51919", 5, "0.2", s, draw_with_curves, true); // faint solution lines
-
-    // the start and end cells get a dot instead of walls
-    let (last_x, last_y) = (grid.width() - 1, grid.height() - 1);
-    let is_dot = |i: usize, j: usize| (i, j) == (0, 0) || (i, j) == (last_x, last_y);
-
-    // each kind of tile is drawn once, in its own coordinates, and every cell
-    // of that kind refers to it with a `<use>`
-    let mut used = [false; 32];
-    for j in 0..grid.height() {
-        for (i, &cell) in grid.row(j).iter().enumerate() {
-            used[usize::from(cell)] |= !is_dot(i, j);
+impl Traces {
+    /// The traces of `solution` (empty without one) for cells of side `s`.
+    pub(crate) fn new(grid: &Grid, s: f64, draw_with_curves: bool, solution: Option<Solution>) -> Self {
+        let mut over = SvgPath::new(s, draw_with_curves, false);
+        let mut under = SvgPath::new(s, draw_with_curves, true);
+        let solution = solution.filter(|s| !s.is_empty());
+        if let Some(trail) = solution {
+            over.render_trace(grid, trail);
+            under.render_trace(grid, trail);
         }
+        Traces { solved: solution.is_some(), over: over.svg, under: under.svg }
     }
-    let mut defs = String::from("<defs>");
-    for cell in (0..32u8).filter(|&cell| used[usize::from(cell)]) {
-        walls.svg.clear();
-        walls.draw_tile(cell, 0.0, 0.0);
-        write!(defs, r#"<path id="t{cell}" d="{}"/>"#, walls.svg.trim_end()).expect("writing to a String cannot fail");
-    }
-    defs.push_str("</defs>");
+}
 
+/// Append a `<use>` of its tile for every cell but the start and end, with
+/// cells of side `s`.
+pub(crate) fn push_uses(out: &mut String, grid: &Grid, s: f64) {
     // the start of a cell's `<use>` for each kind of tile, its x for each
     // column and the rest of it for each row
-    let use_head: Vec<Piece> = (0..32).map(|cell| Piece::new(&format!(r##"<use href="#t{cell}" x=""##))).collect();
+    let use_head: Vec<Piece> =
+        (0..TILE_KINDS).map(|cell| Piece::new(&format!(r##"<use href="#t{cell}" x=""##))).collect();
     let column_x: Vec<Piece> = (0..grid.width())
         .map(|i| {
             let mut x = String::new();
@@ -824,31 +772,56 @@ pub fn svg_render(grid: &Grid, page: PageSize, draw_with_curves: bool, solution:
 
     // rows are independent, so bands of them are drawn in parallel and joined
     let bands = map_bands(grid.height(), grid.width(), |rows| {
-        let mut band = SvgPath::new("#000000", stroke_width, "1.0", s, false, false);
         let mut uses = String::with_capacity(rows.len() * grid.width() * 40);
         for j in rows {
             for (i, &cell) in grid.row(j).iter().enumerate() {
-                if is_dot(i, j) {
-                    band.dot(i as f64 * s, j as f64 * s);
-                } else {
+                if !is_dot(grid, i, j) {
                     use_head[usize::from(cell)].push_to(&mut uses);
                     column_x[i].push_to(&mut uses);
                     row_tail[j].push_to(&mut uses);
                 }
             }
         }
-        (uses, band.dots)
+        uses
     });
-    let mut uses = String::with_capacity(bands.iter().map(|b| b.0.len()).sum());
-    for (band_uses, dots) in bands {
-        uses.push_str(&band_uses);
-        walls.dots.push_str(&dots);
+    out.reserve(bands.iter().map(String::len).sum());
+    for band in bands {
+        out.push_str(&band);
     }
-    let solution = solution.filter(|s| !s.is_empty());
-    if let Some(trail) = solution {
-        over_trace.render_trace(grid, trail);
-        under_trace.render_trace(grid, trail);
+}
+
+/// Render the maze (and optionally its solution) as an SVG document.
+#[must_use]
+pub fn svg_render(grid: &Grid, page: PageSize, draw_with_curves: bool, solution: Option<Solution>) -> String {
+    let (width, s) = svg_scale(grid, page);
+    let height = grid.height() as f64;
+    let stroke_width = 2;
+
+    // each kind of tile is drawn once, in its own coordinates, and every cell
+    // of that kind refers to it with a `<use>`
+    let used = used_tiles(grid, |i, j| is_dot(grid, i, j));
+    let tiles = plain_tiles(s, draw_with_curves, &used);
+    let mut defs = String::from("<defs>");
+    for (cell, d) in tiles.iter().enumerate().filter(|&(cell, _)| used[cell]) {
+        w!(defs, r#"<path id="t{cell}" d="{}"/>"#, d.trim_end());
     }
+    defs.push_str("</defs>");
+
+    let mut uses = String::new();
+    push_uses(&mut uses, grid, s);
+
+    let mut dot_circles = String::new();
+    for (cx, cy, r) in dots(grid, s) {
+        dot_circles.push_str(r#"<circle cx=""#);
+        push_round(&mut dot_circles, cx);
+        dot_circles.push_str(r#"" cy=""#);
+        push_round(&mut dot_circles, cy);
+        dot_circles.push_str(r#"" r=""#);
+        push_round(&mut dot_circles, r);
+        dot_circles.push_str(r##"" fill-opacity="1.0" stroke-opacity="0" fill="#E51919" />"##);
+    }
+
+    let traces = Traces::new(grid, s, draw_with_curves, solution);
 
     let w = py_float_repr(width * s);
     let h = py_float_repr(height * s);
@@ -857,26 +830,23 @@ pub fn svg_render(grid: &Grid, page: PageSize, draw_with_curves: bool, solution:
         r#"<svg id="maze" xmlns="http://www.w3.org/2000/svg" {view_box} width="{w}px" height="{h}px" stroke-width="{stroke_width}" fill-opacity="0.0" stroke="black">"#
     );
 
-    // the Python version always appends an (empty) set of extra dots
-    let dots = "";
     let mut out = String::with_capacity(
-        head.len() + defs.len() + uses.len() + walls.dots.len() + over_trace.svg.len() + under_trace.svg.len() + 400,
+        head.len() + defs.len() + uses.len() + dot_circles.len() + traces.over.len() + traces.under.len() + 400,
     );
     out.push_str(&head);
     out.push(' ');
     out.push_str(&defs);
-    write!(
+    w!(
         out,
-        r#" <g stroke-opacity="{}" stroke-width="{}" stroke="{}" stroke-linecap="square">{uses}</g> {}"#,
-        walls.opacity, walls.stroke_width, walls.colour, walls.dots
-    )
-    .expect("writing to a String cannot fail");
-    if solution.is_some() {
-        for p in [&over_trace, &under_trace] {
-            out.push(' ');
-            p.write_path(&mut out);
+        r##" <g stroke-opacity="1.0" stroke-width="{stroke_width}" stroke="#000000" stroke-linecap="square">{uses}</g> {dot_circles}"##
+    );
+    if traces.solved {
+        // the solution, and fainter where it passes under a crossing
+        for (opacity, d) in [("1.0", &traces.over), ("0.2", &traces.under)] {
+            w!(out, r##" <path stroke-opacity="{opacity}" stroke-width="5" stroke="#E51919" d="{d}" /> "##);
         }
     }
-    write!(out, " {dots} </svg>").expect("writing to a String cannot fail");
+    // the Python version always appends an (empty) set of extra dots
+    out.push_str("  </svg>");
     out
 }

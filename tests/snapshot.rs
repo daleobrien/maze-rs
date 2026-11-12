@@ -1,9 +1,13 @@
 //! Locks the generated output for a set of fixed maze ids, so performance
 //! work can't change a single byte of what the generator produces without
-//! the hashes here being updated on purpose.
+//! the hashes here being updated on purpose. The plain renderers match the
+//! Python version; the styled and ink ones are locked too, so refactoring
+//! them can't change their output by accident.
 
 use maze::random::Rng;
+use maze::renderers::ink::{ink_pdf_content, ink_svg, seed_from_id};
 use maze::renderers::pdf::{pdf_content, PdfOptions};
+use maze::renderers::style::{styled_pdf, styled_svg, Colour, Corners, DeadEnds, Style};
 use maze::renderers::svg::svg_render;
 use maze::renderers::text::text_render;
 use maze::renderers::PageSize;
@@ -58,4 +62,80 @@ const CASES: &[(&str, usize, usize, i64, bool, &str)] = &[
     ("wide", 250, 20, 50, false, "66b62a31beb7a2058334edcbf851273f984a08dc0c05c475d1197b96b3089e9b"),
     ("readme-big", 168, 240, 50, true, "f4204bcc5c396fb768fd8dfa6977875c578caaa6f3ed99a010b8906824a5cd0c"),
     ("one", 1, 1, 50, false, "ca45f9dda459f8fe26575271a93592bcbc5576bf25a2337feea2be7cf4aaecf5"),
+];
+
+/// The style options worth telling apart: none, the frame alone, and a few
+/// mixes of every other option.
+fn styles(id: &str) -> Vec<Style> {
+    vec![
+        Style::default(),
+        Style { frame: Some(id.to_owned()), ..Style::default() },
+        Style {
+            corners: Some(Corners::Bevel),
+            dead_ends: Some(DeadEnds::Flat),
+            corridor: Some(0.4),
+            bridge_gap: Some(0.1),
+            line: Some(1.5),
+            wall_colour: Colour::parse("#123"),
+            solution_colour: Colour::parse("#00aa33"),
+            background: Colour::parse("#fffaf0"),
+            frame: None,
+        },
+        Style {
+            corners: Some(Corners::Square),
+            dead_ends: Some(DeadEnds::Round),
+            corridor: Some(0.8),
+            frame: Some(id.to_owned()),
+            ..Style::default()
+        },
+        Style { corners: Some(Corners::Round), corridor: Some(0.3), bridge_gap: Some(0.15), ..Style::default() },
+    ]
+}
+
+/// A PDF with its creation and modification dates blanked out.
+fn undated(mut pdf: Vec<u8>) -> Vec<u8> {
+    for key in [&b"/CreationDate ("[..], b"/ModDate ("] {
+        let at = pdf.windows(key.len()).position(|w| w == key).expect("the PDF has dates") + key.len();
+        pdf[at..at + 23].fill(b'X');
+    }
+    pdf
+}
+
+/// Hash of every styled and ink output for one maze: SVG and PDF, curved
+/// and straight, with and without the solution, in each of [`styles`].
+fn styled_outputs(id: &str, width: usize, height: usize, density: i64, add_a_loop: bool) -> String {
+    let mut rng = Rng::from_str_seed(id);
+    let grid = create_maze(width, height, density, add_a_loop, &mut rng);
+    let solution = find_solution(&grid);
+    let seed = seed_from_id(id);
+
+    let mut all = Vec::new();
+    for style in styles(id) {
+        for curves in [true, false] {
+            let options = PdfOptions { draw_with_curves: curves, page: PageSize::A4, landscape: false };
+            for solved in [None, solution.as_deref()] {
+                all.extend_from_slice(styled_svg(&grid, PageSize::A4, curves, solved, &style).as_bytes());
+                all.extend_from_slice(&undated(styled_pdf(&grid, &options, solved, &style)));
+                all.extend_from_slice(ink_svg(&grid, PageSize::A4, curves, solved, seed, &style).as_bytes());
+                all.extend_from_slice(ink_pdf_content(&grid, &options, solved, seed, &style).as_bytes());
+            }
+        }
+    }
+    sha(&all)
+}
+
+#[test]
+fn styled_outputs_are_unchanged() {
+    for &(id, w, h, d, l, expected) in STYLED_CASES {
+        assert_eq!(styled_outputs(id, w, h, d, l), expected, "maze {id} {w}x{h} density={d} loop={l}");
+    }
+}
+
+const STYLED_CASES: &[(&str, usize, usize, i64, bool, &str)] = &[
+    ("abc", 10, 8, 50, false, "a57b24bab08f677caf7aae7f03bb098f345a081a3c9149bec9104e91d46714d6"),
+    ("my-maze", 23, 30, 50, false, "eeaf4f5f4fe899b7e02d1c65f05da6bf7a033fb7895d66dd8759561e3a68300e"),
+    ("loop", 23, 30, 50, true, "e81053e03a93ea6d09cbcb83d9f755cf717170d950fcf41883258f5862d5ad37"),
+    ("dense", 40, 40, 10, false, "7f32e819ce7c84da735a7793243acc16dd5425cf78831853dcdd55c06d1e77d7"),
+    ("tall", 3, 60, 50, false, "4e39d4204ef7420c2fdc6705b3706b8398b29b14b066a46208f7e98a394584b3"),
+    ("one", 1, 1, 50, false, "0dc0dd9772ae3bb09b6f7b6575396edb93a77cf6fe081045f82c06673bed94e3"),
 ];
