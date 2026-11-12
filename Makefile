@@ -1,14 +1,16 @@
 # Convenience wrapper around cargo and the maze CLI.
 # Run `make` (or `make help`) for the list. W=... and H=... set the maze size
 # for `make text`, `make svg` and `make pdf`, ID=... fixes the maze id (a
-# random maze otherwise), and BENCH=... filters `make bench` (e.g. BENCH=render).
+# random maze otherwise), INK=1 draws `make svg` and `make pdf` by hand in ink
+# (-I), and BENCH=... filters `make bench` (e.g. BENCH=render).
 
 .DEFAULT_GOAL := help
-.PHONY: help check build debug test bench run text svg pdf install fmt clippy lint clean
+.PHONY: help check build debug test bench run text svg pdf ink install fmt clippy lint clean
 
 W ?= 21
 H ?= 30
 ID ?=
+INK ?=
 BENCH ?=
 OUT ?= out
 
@@ -16,6 +18,7 @@ OUT ?= out
 # put the build somewhere else.
 MAZE := cargo run --release --quiet --
 ID_ARG := $(if $(ID),-i $(ID))
+INK_ARG := $(if $(INK),-I)
 
 help:
 	@echo "maze — common tasks"
@@ -28,6 +31,8 @@ help:
 	@echo "  make text       print a W x H maze (ID=... for a fixed one)"
 	@echo "  make svg        write a W x H maze and its solution to $(OUT)/maze.svg and maze-solved.svg"
 	@echo "  make pdf        write a W x H maze to $(OUT)/maze.pdf"
+	@echo "                 (INK=1 draws svg and pdf by hand, in ink)"
+	@echo "  make ink        hand-drawn svg, solution and pdf of one maze in $(OUT)/maze-ink.*"
 	@echo "  make install    cargo install --path . — puts maze on your PATH"
 	@echo "  make lint       cargo fmt --check, then clippy"
 
@@ -47,12 +52,18 @@ text:
 	$(MAZE) text -W $(W) -H $(H) $(ID_ARG)
 svg:
 	@mkdir -p $(OUT)
-	$(MAZE) svg $(OUT)/maze.svg -s $(OUT)/maze-solved.svg -W $(W) -H $(H) $(ID_ARG)
+	$(MAZE) svg $(OUT)/maze.svg -s $(OUT)/maze-solved.svg -W $(W) -H $(H) $(ID_ARG) $(INK_ARG)
 	@echo "Wrote $(OUT)/maze.svg and $(OUT)/maze-solved.svg"
 pdf:
 	@mkdir -p $(OUT)
-	$(MAZE) pdf $(OUT)/maze.pdf -W $(W) -H $(H) $(ID_ARG)
+	$(MAZE) pdf $(OUT)/maze.pdf -W $(W) -H $(H) $(ID_ARG) $(INK_ARG)
 	@echo "Wrote $(OUT)/maze.pdf"
+ink:
+	@mkdir -p $(OUT)
+	$(eval INK_ID := $(or $(ID),$(shell date +%s)))
+	$(MAZE) svg $(OUT)/maze-ink.svg -s $(OUT)/maze-ink-solved.svg -W $(W) -H $(H) -i $(INK_ID) -I
+	$(MAZE) pdf $(OUT)/maze-ink.pdf -W $(W) -H $(H) -i $(INK_ID) -I
+	@echo "Wrote $(OUT)/maze-ink.svg, maze-ink-solved.svg and maze-ink.pdf (maze id $(INK_ID))"
 install:
 	cargo install --path .
 fmt:

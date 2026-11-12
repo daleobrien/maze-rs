@@ -5,7 +5,7 @@ use std::f64::consts::PI;
 use std::fmt::Write as _;
 
 use crate::maze::{Grid, CROSS_EW, CROSS_NS};
-use crate::renderers::{map_bands, page_size, Piece, push_fixed_trimmed, py_float_repr, Geometry, PageSize};
+use crate::renderers::{map_bands, page_size, push_fixed_trimmed, py_float_repr, Geometry, PageSize, Piece};
 
 const QUARTER: f64 = PI / 2.0;
 const HALF: f64 = PI;
@@ -705,9 +705,9 @@ impl SvgPath {
     }
 }
 
-/// Render the maze (and optionally its solution) as an SVG document.
-#[must_use]
-pub fn svg_render(grid: &Grid, page: PageSize, draw_with_curves: bool, solution: Option<&[(isize, isize)]>) -> String {
+/// The width of the SVG drawing in cells (at least the grid's width, more
+/// when the maze is too tall for the page) and the side of a cell.
+pub(crate) fn svg_scale(grid: &Grid, page: PageSize) -> (f64, f64) {
     let (page_width, page_height) = page_size(page);
     let height = grid.height() as f64;
 
@@ -717,8 +717,66 @@ pub fn svg_render(grid: &Grid, page: PageSize, draw_with_curves: bool, solution:
     if (height / width) > (page_height / page_width) {
         width = (page_width / page_height * height).ceil();
     }
+    (width, page_width / width)
+}
 
-    let s = page_width / width;
+/// The maze drawn as SVG path data, for renderers that restyle the same
+/// geometry (see `ink`).
+pub(crate) struct PathData {
+    /// The walls of each kind of tile, indexed by cell value, in the tile's
+    /// own coordinates; empty for kinds the maze doesn't use.
+    pub tiles: Vec<String>,
+    /// The start and end cells, drawn as a dot (centre and radius) instead of walls.
+    pub dots: Vec<(f64, f64, f64)>,
+    /// The solution, in page coordinates, where it is on top...
+    pub over: String,
+    /// ...and where it passes under a crossing.
+    pub under: String,
+}
+
+/// Whether cell `(i, j)` is the start or end, which get a dot instead of walls.
+pub(crate) fn is_dot(grid: &Grid, i: usize, j: usize) -> bool {
+    (i, j) == (0, 0) || (i, j) == (grid.width() - 1, grid.height() - 1)
+}
+
+/// The geometry [`svg_render`] draws, with cells of side `s`.
+pub(crate) fn path_data(grid: &Grid, s: f64, draw_with_curves: bool, solution: Option<&[(isize, isize)]>) -> PathData {
+    let mut walls = SvgPath::new("#000000", 2, "1.0", s, draw_with_curves, false);
+    let mut used = [false; 32];
+    let mut dots = Vec::new();
+    for j in 0..grid.height() {
+        for (i, &cell) in grid.row(j).iter().enumerate() {
+            if is_dot(grid, i, j) {
+                dots.push((i as f64 * s + s / 2.0, j as f64 * s + s / 2.0, s / 3.0));
+            } else {
+                used[usize::from(cell)] = true;
+            }
+        }
+    }
+    let tiles = (0..32u8)
+        .map(|cell| {
+            walls.svg.clear();
+            if used[usize::from(cell)] {
+                walls.draw_tile(cell, 0.0, 0.0);
+            }
+            walls.svg.clone()
+        })
+        .collect();
+
+    let mut over = SvgPath::new("#E51919", 5, "1.0", s, draw_with_curves, false);
+    let mut under = SvgPath::new("#E51919", 5, "0.2", s, draw_with_curves, true);
+    if let Some(trail) = solution.filter(|s| !s.is_empty()) {
+        over.render_trace(grid, trail);
+        under.render_trace(grid, trail);
+    }
+    PathData { tiles, dots, over: over.svg, under: under.svg }
+}
+
+/// Render the maze (and optionally its solution) as an SVG document.
+#[must_use]
+pub fn svg_render(grid: &Grid, page: PageSize, draw_with_curves: bool, solution: Option<&[(isize, isize)]>) -> String {
+    let (width, s) = svg_scale(grid, page);
+    let height = grid.height() as f64;
     let stroke_width = 2;
 
     let mut walls = SvgPath::new("#000000", stroke_width, "1.0", s, draw_with_curves, false); // Maze walls

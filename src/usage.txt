@@ -15,9 +15,9 @@ https://gist.github.com/856138
 
 Usage:
   maze -h
-  maze pdf FILENAME [-W WIDTH] [-H HEIGHT] [-p PAGE_SIZE] [-d DENSITY] [-S] [-L] [-O ORIENTATION] [-i MAZE_ID]
+  maze pdf FILENAME [-W WIDTH] [-H HEIGHT] [-p PAGE_SIZE] [-d DENSITY] [-S] [-L] [-I] [-O ORIENTATION] [-i MAZE_ID]
   maze text [-W WIDTH] [-H HEIGHT] [-p PAGE_SIZE] [-d DENSITY] [-L] [-i MAZE_ID]
-  maze svg FILENAME [-W WIDTH] [-H HEIGHT] [-p PAGE_SIZE] [-d DENSITY] [-S] [-L] [-i MAZE_ID] [-s SOLUTION_FILENAME]
+  maze svg FILENAME [-W WIDTH] [-H HEIGHT] [-p PAGE_SIZE] [-d DENSITY] [-S] [-L] [-I] [-i MAZE_ID] [-s SOLUTION_FILENAME]
 
 Options:
   -h, --help                        Show this help message and exit
@@ -30,6 +30,8 @@ Options:
   -L                                Enable a loop
 
   -S                                Draw with straight lines instead of curves
+
+  -I --ink                          Draw by hand, in ink on paper (the wobble is fixed by the maze id)
 
   -p PAGE_SIZE                      Page size, (A0,A4 or Letter) [default: A4]
   -O --orientation ORIENTATION      Orientation, P=portrait, L=landscape [default: P]

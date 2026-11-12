@@ -18,6 +18,23 @@ maze pdf my_maze.pdf -S -O L
 
 Run `maze` with no arguments to see all options.
 
+Add `-I` (`--ink`) to `svg` or `pdf` for a hand-drawn look: brown ink on
+paper, with every wall wobbling a little. The wobble is seeded from the maze
+id, so a maze always comes out the same. Since no two cells look alike the
+tiles can't be reused, so these files are several times bigger and slower to
+write (`src/renderers/ink.rs`).
+
+<p>
+  <img src="docs/sample-ink.svg" alt="A hand-drawn weave maze" width="45%">
+  <img src="docs/sample-ink-solved.svg" alt="The same maze with its solution pencilled in" width="45%">
+</p>
+
+The sample above, and its solution, come from:
+
+```bash
+maze svg docs/sample-ink.svg -I -s docs/sample-ink-solved.svg -W 12 -H 16 -i readme
+```
+
 How parity is kept:
 
 - `src/random.rs` is wyrand seeded from a hash of the maze id, so the same

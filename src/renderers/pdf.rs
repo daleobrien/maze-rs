@@ -14,8 +14,8 @@ use flate2::write::ZlibEncoder;
 use flate2::{Compress, Compression, FlushCompress, Status};
 
 use crate::maze::Grid;
+use crate::renderers::{map_bands, page_size, push_fixed_trimmed, Geometry, PageSize, Piece};
 use crate::simd::adler32;
-use crate::renderers::{map_bands, page_size, Piece, push_fixed_trimmed, Geometry, PageSize};
 
 /// ReportLab's `fp_str` for a single number, appended to `out`.
 ///
@@ -541,36 +541,55 @@ pub struct TileForm {
     pub stream: String,
 }
 
+/// Where the maze goes on the page: the page size, the side of a cell and
+/// the corner of the first cell, all in points.
+pub(crate) struct PageLayout {
+    pub page_width: f64,
+    pub page_height: f64,
+    pub s: f64,
+    pub left_margin: f64,
+    pub top_margin: f64,
+}
+
+impl PageLayout {
+    pub fn new(grid: &Grid, options: &PdfOptions) -> Self {
+        let (mut page_width, mut page_height) = page_size(options.page);
+        if options.landscape {
+            std::mem::swap(&mut page_width, &mut page_height);
+        }
+
+        let mut left_margin = 15.0;
+        let mut top_margin = 15.0;
+
+        // cells must be square, it's the math!, I'm not doing it again.
+        // so scale the width if the height will go over the page
+        let (org_width, height) = (grid.width(), grid.height());
+        let mut width = org_width as f64;
+        let ratio = (page_height - 2.0 * top_margin) / (page_width - 2.0 * left_margin);
+        if height as f64 / width > ratio {
+            width = (height as f64 / ratio).ceil();
+        }
+
+        let s = (page_width - 2.0 * left_margin) / width;
+
+        // center the maze, looks better for mazes that don't fit the page nicely
+        left_margin -= (org_width as f64 - width) * s / 2.0;
+        top_margin -= (s * height as f64 - (page_height - 2.0 * top_margin)) / 2.0;
+
+        PageLayout { page_width, page_height, s, left_margin, top_margin }
+    }
+}
+
 /// The uncompressed page content stream.
 #[must_use]
 pub fn pdf_content(grid: &Grid, options: &PdfOptions) -> PageContent {
-    let (mut page_width, mut page_height) = page_size(options.page);
-    if options.landscape {
-        std::mem::swap(&mut page_width, &mut page_height);
-    }
+    let PageLayout { page_width, page_height, s, left_margin, top_margin } = PageLayout::new(grid, options);
+    let (org_width, height) = (grid.width(), grid.height());
 
     let mut c = Canvas::new("1 0 0 1 0 0 cm  BT /F1 12 Tf 14.4 TL ET");
 
     // 0=butt,1=round,2=square
     c.push_op("1 J");
-
-    let mut left_margin = 15.0;
-    let mut top_margin = 15.0;
-
-    // cells must be square, it's the math!, I'm not doing it again.
-    // so scale the width if the height will go over the page
-    let (org_width, height) = (grid.width(), grid.height());
-    let mut width = org_width as f64;
-    let ratio = (page_height - 2.0 * top_margin) / (page_width - 2.0 * left_margin);
-    if height as f64 / width > ratio {
-        width = (height as f64 / ratio).ceil();
-    }
-
-    let s = (page_width - 2.0 * left_margin) / width;
-
-    // center the maze, looks better for mazes that don't fit the page nicely
-    left_margin -= (org_width as f64 - width) * s / 2.0;
-    top_margin -= (s * height as f64 - (page_height - 2.0 * top_margin)) / 2.0;
 
     c.set_line_width(s / 7.0);
     c.push_op("0 0 0 RG");
@@ -601,7 +620,8 @@ pub fn pdf_content(grid: &Grid, options: &PdfOptions) -> PageContent {
     push_fp_num(&mut step, s);
     step.push_str(" 0 cm");
     let draw_form: Vec<String> = (0..32).map(|cell| format!("\n/T{cell} Do")).collect();
-    let step_and_draw: Vec<Piece> = draw_form.iter().map(|draw| Piece::new(&format!("{step} {}", &draw[1..]))).collect();
+    let step_and_draw: Vec<Piece> =
+        draw_form.iter().map(|draw| Piece::new(&format!("{step} {}", &draw[1..]))).collect();
 
     let draw_rows = |c: &mut Canvas, rows: Range<usize>| {
         for j in rows {
@@ -663,7 +683,7 @@ const PARALLEL_COMPRESS_MIN_BYTES: usize = 1 << 17;
 /// Large inputs are split into pieces that are deflated in parallel, each
 /// ending on a byte boundary (a sync flush), so the pieces join into one
 /// ordinary zlib stream, as `pigz` does.
-fn zlib_compress(data: &[u8]) -> Vec<u8> {
+pub(crate) fn zlib_compress(data: &[u8]) -> Vec<u8> {
     if data.len() < PARALLEL_COMPRESS_MIN_BYTES {
         let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
         encoder.write_all(data).expect("writing to a Vec cannot fail");
@@ -725,7 +745,7 @@ fn adler32_combine(adler1: u32, adler2: u32, len2: usize) -> u32 {
 }
 
 /// Current UTC time in PDF date format.
-fn pdf_date() -> String {
+pub(crate) fn pdf_date() -> String {
     let secs = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs().try_into().unwrap_or(i64::MAX));
     let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
     // civil-from-days (Howard Hinnant's algorithm)

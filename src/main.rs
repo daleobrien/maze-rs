@@ -2,6 +2,7 @@ use std::io;
 use std::process::ExitCode;
 
 use maze::random::Rng;
+use maze::renderers::ink::{ink_pdf, ink_svg, seed_from_id};
 use maze::renderers::pdf::{pdf_render, PdfOptions};
 use maze::renderers::svg::svg_render;
 use maze::renderers::text::text_render;
@@ -20,9 +21,9 @@ impl Command {
     /// The options this command's usage line accepts.
     fn allowed_options(&self) -> &'static [char] {
         match self {
-            Command::Pdf { .. } => &['W', 'H', 'p', 'd', 'S', 'L', 'O', 'i'],
+            Command::Pdf { .. } => &['W', 'H', 'p', 'd', 'S', 'L', 'O', 'i', 'I'],
             Command::Text => &['W', 'H', 'p', 'd', 'L', 'i'],
-            Command::Svg { .. } => &['W', 'H', 'p', 'd', 'S', 'L', 'i', 's'],
+            Command::Svg { .. } => &['W', 'H', 'p', 'd', 'S', 'L', 'i', 's', 'I'],
         }
     }
 }
@@ -35,6 +36,7 @@ struct Options {
     density: Option<String>,
     add_a_loop: bool,
     straight: bool,
+    ink: bool,
     page: Option<String>,
     orientation: Option<String>,
     maze_id: Option<String>,
@@ -48,6 +50,7 @@ impl Options {
             ('h', _) => return Err(Exit::Help),
             ('L', None) => return set_flag(&mut self.add_a_loop),
             ('S', None) => return set_flag(&mut self.straight),
+            ('I', None) => return set_flag(&mut self.ink),
             ('W', Some(value)) => (&mut self.width, value),
             ('H', Some(value)) => (&mut self.height, value),
             ('d', Some(value)) => (&mut self.density, value),
@@ -99,6 +102,7 @@ const OPTIONS: &[OptionSpec] = &[
     valued('d', Some("density")),
     flag('L', None),
     flag('S', None),
+    flag('I', Some("ink")),
     valued('p', None),
     valued('O', Some("orientation")),
     valued('i', Some("maze_id")),
@@ -263,17 +267,21 @@ fn run(Args { command, options }: Args) -> Result<(), Exit> {
     // allow the same maze to be generated if a maze_id is given.
     let maze_id = options.maze_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let mut rng = Rng::from_str_seed(&maze_id);
+    let ink_seed = seed_from_id(&maze_id);
 
     let page = parse_page(options.page.as_deref().unwrap_or("A4"))?;
     println!("width = {width}, height={height}");
 
     let grid = create_maze(width, height, density, options.add_a_loop, &mut rng);
     let draw_with_curves = !options.straight;
+    let options_ink = options.ink;
 
     match command {
         Command::Pdf { filename } => {
             let landscape = options.orientation.as_deref() == Some("L");
-            write_file(&filename, pdf_render(&grid, &PdfOptions { draw_with_curves, page, landscape }))
+            let options = PdfOptions { draw_with_curves, page, landscape };
+            let pdf = if options_ink { ink_pdf(&grid, &options, ink_seed) } else { pdf_render(&grid, &options) };
+            write_file(&filename, pdf)
         }
         // to screen
         Command::Text => {
@@ -281,10 +289,17 @@ fn run(Args { command, options }: Args) -> Result<(), Exit> {
             Ok(())
         }
         Command::Svg { filename } => {
-            let svg = svg_render(&grid, page, draw_with_curves, None);
+            let render = |solution: Option<&[(isize, isize)]>| {
+                if options.ink {
+                    ink_svg(&grid, page, draw_with_curves, solution, ink_seed)
+                } else {
+                    svg_render(&grid, page, draw_with_curves, solution)
+                }
+            };
+            let svg = render(None);
             if let Some(solution_filename) = &options.solution {
                 let solution = find_solution(&grid);
-                write_file(solution_filename, svg_render(&grid, page, draw_with_curves, solution.as_deref()))?;
+                write_file(solution_filename, render(solution.as_deref()))?;
             }
             write_file(&filename, svg)
         }

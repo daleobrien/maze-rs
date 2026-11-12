@@ -2,6 +2,7 @@ use std::fmt::Write as _;
 use std::num::NonZeroUsize;
 use std::ops::Range;
 
+pub mod ink;
 pub mod pdf;
 pub mod svg;
 pub mod text;
