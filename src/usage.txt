@@ -31,7 +31,7 @@ Options:
 
   -S                                Draw with straight lines instead of curves
 
-  -I --ink                          Draw by hand, in ink on paper (the wobble is fixed by the maze id)
+  -I --ink                          Draw by hand, in ink (the wobble is fixed by the maze id)
 
   -p PAGE_SIZE                      Page size, (A0,A4 or Letter) [default: A4]
   -O --orientation ORIENTATION      Orientation, P=portrait, L=landscape [default: P]

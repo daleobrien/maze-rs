@@ -3,7 +3,7 @@
 //! The maze has the same geometry as the plain renderers (it is taken from
 //! [`path_data`]), but every wall is flattened to short pieces, nudged by a
 //! smooth noise field and drawn with a pen whose width wanders, in brown ink
-//! on paper. The noise is seeded from the maze id, so a maze always comes out
+//! on a transparent background. The noise is seeded from the maze id, so a maze always comes out
 //! the same, and depends only on where a point is on the page, so walls that
 //! meet at the edge of a cell still meet after the wobble.
 //!
@@ -21,11 +21,9 @@ use crate::renderers::{map_bands, push_fixed_trimmed, py_float_repr, PageSize};
 
 type Point = (f64, f64);
 
-/// The paper, the ink and the pencil used for the solution.
-const PAPER: &str = "#faf6ec";
+/// The ink and the pencil used for the solution.
 const INK: &str = "#2b2118";
 const PENCIL: &str = "#c0392b";
-const PAPER_RGB: [f64; 3] = [0.98, 0.965, 0.925];
 const INK_RGB: [f64; 3] = [0.169, 0.129, 0.094];
 const DOT_RGB: [f64; 3] = [0.753, 0.224, 0.169];
 
@@ -311,13 +309,6 @@ pub fn ink_svg(
         r##"<svg id="maze" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} {h}" width="{w}px" height="{h}px">"##
     )
     .expect("writing to a String cannot fail");
-    // a faint grain over the paper
-    write!(
-        out,
-        r##"<defs><filter id="grain" x="0" y="0" width="100%" height="100%"><feTurbulence type="fractalNoise" baseFrequency="0.85" numOctaves="2" seed="{}"/><feColorMatrix values="0 0 0 0 0.42 0 0 0 0 0.36 0 0 0 0 0.25 0 0 0 0.08 0"/></filter></defs><rect width="100%" height="100%" fill="{PAPER}"/><rect width="100%" height="100%" filter="url(#grain)"/>"##,
-        seed % 10_000
-    )
-    .expect("writing to a String cannot fail");
 
     let base = base_width(s);
     write!(out, r#"<g fill="none" stroke="{INK}" stroke-linecap="round" stroke-linejoin="round">"#)
@@ -386,18 +377,13 @@ fn push_rgb(out: &mut String, rgb: [f64; 3], op: &str) {
 /// The uncompressed page content stream of a hand-drawn PDF.
 #[must_use]
 pub fn ink_pdf_content(grid: &Grid, options: &PdfOptions, seed: u64) -> String {
-    let PageLayout { page_width, page_height, s, left_margin, top_margin } = PageLayout::new(grid, options);
+    let PageLayout { s, left_margin, top_margin, .. } = PageLayout::new(grid, options);
     let pen = Pen::new(s, seed);
     let data = path_data(grid, s, options.draw_with_curves, None);
     let tiles = flat_tiles(&data.tiles, pen.step);
 
-    let mut out = String::new();
-    push_rgb(&mut out, PAPER_RGB, "rg");
-    out.push_str("0 0 ");
-    push_fixed_trimmed(&mut out, page_width, 3);
-    out.push(' ');
-    push_fixed_trimmed(&mut out, page_height, 3);
-    out.push_str(" re f\n1 J 1 j\n");
+    // no background, so the page shows through
+    let mut out = String::from("1 J 1 j\n");
     // the maze is drawn as in the SVG, top down, so flip it onto the page
     out.push_str("1 0 0 -1 ");
     push_fixed_trimmed(&mut out, left_margin, 3);

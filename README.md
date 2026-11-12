@@ -27,8 +27,8 @@ Run `maze` with no arguments to see all the options. The same maze id
 
 ## Hand-drawn ink
 
-Add `-I` (`--ink`) to `svg` or `pdf` to draw the maze in brown ink on paper,
-with every wall wobbling slightly. The wobble is seeded from the maze id, so
+Add `-I` (`--ink`) to `svg` or `pdf` to draw the maze in brown ink on a
+transparent background, with every wall wobbling slightly. The wobble is seeded from the maze id, so
 a maze always comes out the same. The solved sample at the top was made
 with:
 
