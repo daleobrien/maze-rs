@@ -100,3 +100,59 @@ pub fn text_render(grid: &Grid) -> String {
     // written, so the bytes are valid UTF-8
     unsafe { String::from_utf8_unchecked(out) }
 }
+
+/// The heavy box drawing character for a light one.
+fn heavy(c: char) -> char {
+    match c {
+        '│' => '┃',
+        '─' => '━',
+        '┌' => '┏',
+        '┐' => '┓',
+        '└' => '┗',
+        '┘' => '┛',
+        '├' => '┣',
+        '┤' => '┫',
+        '┬' => '┳',
+        '┴' => '┻',
+        c => c,
+    }
+}
+
+/// Render the maze as [`text_render`] does, with the cells on `solution`
+/// drawn in heavy lines.
+#[must_use]
+pub fn text_render_solved(grid: &Grid, solution: &[(isize, isize)]) -> String {
+    let mut on_path = vec![false; grid.width() * grid.height()];
+    let mut mark = |(x, y): (isize, isize)| {
+        if let (Ok(x), Ok(y)) = (usize::try_from(x), usize::try_from(y)) {
+            if x < grid.width() && y < grid.height() {
+                on_path[y * grid.width() + x] = true;
+            }
+        }
+    };
+    for pair in solution.windows(2) {
+        let (p, q) = (pair[0], pair[1]);
+        mark(p);
+        mark(q);
+        // a jump of two cells passes through a crossing
+        mark(((p.0 + q.0).div_euclid(2), (p.1 + q.1).div_euclid(2)));
+    }
+    if let [only] = solution {
+        mark(*only);
+    }
+
+    let plain = text_render(grid);
+    let mut out = String::with_capacity(plain.len() + plain.len() / 4);
+    for (n, line) in plain.split_inclusive('\n').enumerate() {
+        // line 0 is "Start", then each row of cells takes two lines
+        let row = n.checked_sub(1).map(|n| n / 2).filter(|&y| y < grid.height());
+        for (k, c) in line.chars().enumerate() {
+            let cell = row.map(|y| (y, k / 3)).filter(|&(_, x)| x < grid.width());
+            out.push(match cell {
+                Some((y, x)) if on_path[y * grid.width() + x] => heavy(c),
+                _ => c,
+            });
+        }
+    }
+    out
+}

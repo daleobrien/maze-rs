@@ -4,6 +4,7 @@ use std::ops::Range;
 
 pub mod ink;
 pub mod pdf;
+pub mod style;
 pub mod svg;
 pub mod text;
 

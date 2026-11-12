@@ -15,17 +15,18 @@ use std::f64::consts::PI;
 use std::fmt::Write as _;
 
 use crate::maze::Grid;
-use crate::renderers::pdf::{pdf_date, zlib_compress, PageLayout, PdfOptions};
+use crate::renderers::pdf::PdfOptions;
+use crate::renderers::style::{
+    pdf_background, pdf_document, pdf_flip, pdf_frame, pdf_layout, svg_frame, svg_open, Colour, Corners, Style,
+};
 use crate::renderers::svg::{is_dot, path_data, svg_scale};
-use crate::renderers::{map_bands, push_fixed_trimmed, py_float_repr, PageSize};
+use crate::renderers::{map_bands, push_fixed_trimmed, PageSize};
 
 type Point = (f64, f64);
 
 /// The ink and the pencil used for the solution.
-const INK: &str = "#2b2118";
-const PENCIL: &str = "#c0392b";
-const INK_RGB: [f64; 3] = [0.169, 0.129, 0.094];
-const DOT_RGB: [f64; 3] = [0.753, 0.224, 0.169];
+const INK: Colour = Colour([0x2b, 0x21, 0x18]);
+const PENCIL: Colour = Colour([0xc0, 0x39, 0x2b]);
 
 /// How many pieces of a wall are drawn with one width before the pen changes.
 const CHUNK: usize = 6;
@@ -287,6 +288,16 @@ fn base_width(s: f64) -> f64 {
     s * 0.075
 }
 
+/// The walls of each kind of tile: the plain renderer's, unless the style
+/// changes their shape.
+fn tile_paths(s: f64, draw_with_curves: bool, style: &Style, plain: Vec<String>) -> Vec<String> {
+    if style.custom_shape() {
+        style.tiles(s, draw_with_curves)
+    } else {
+        plain
+    }
+}
+
 /// Render the maze (and optionally its solution) as a hand-drawn SVG.
 #[must_use]
 pub fn ink_svg(
@@ -295,23 +306,23 @@ pub fn ink_svg(
     draw_with_curves: bool,
     solution: Option<&[(isize, isize)]>,
     seed: u64,
+    style: &Style,
 ) -> String {
     let (width, s) = svg_scale(grid, page);
+    let (w, h) = (width * s, grid.height() as f64 * s);
     let pen = Pen::new(s, seed);
-    let data = path_data(grid, s, draw_with_curves, solution);
-    let tiles = flat_tiles(&data.tiles, pen.step);
+    let curves = style.corners.map_or(draw_with_curves, |c| c == Corners::Round);
+    let data = path_data(grid, s, curves, solution);
+    let tiles = flat_tiles(&tile_paths(s, draw_with_curves, style, data.tiles), pen.step);
+    let ink = style.wall_colour.unwrap_or(INK);
+    let pencil = style.solution_colour.unwrap_or(PENCIL).hex();
+    let ink_hex = ink.hex();
 
-    let w = py_float_repr(width * s);
-    let h = py_float_repr(grid.height() as f64 * s);
     let mut out = String::new();
-    write!(
-        out,
-        r##"<svg id="maze" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} {h}" width="{w}px" height="{h}px">"##
-    )
-    .expect("writing to a String cannot fail");
+    svg_open(&mut out, w, h, s, style);
 
-    let base = base_width(s);
-    write!(out, r#"<g fill="none" stroke="{INK}" stroke-linecap="round" stroke-linejoin="round">"#)
+    let base = style.line.unwrap_or_else(|| base_width(s));
+    write!(out, r#"<g fill="none" stroke="{ink_hex}" stroke-linecap="round" stroke-linejoin="round">"#)
         .expect("writing to a String cannot fail");
     for (factor, d) in WIDTHS.iter().zip(walls(grid, s, &pen, &tiles, Format::Svg)) {
         if !d.is_empty() {
@@ -323,11 +334,8 @@ pub fn ink_svg(
     out.push_str("</g>");
 
     // the start and end, inked in
-    out.push_str(r#"<path fill=""#);
-    out.push_str(PENCIL);
-    out.push_str(r#"" fill-opacity="0.85" stroke=""#);
-    out.push_str(INK);
-    out.push_str(r#"" stroke-width=""#);
+    write!(out, r#"<path fill="{pencil}" fill-opacity="0.85" stroke="{ink_hex}" stroke-width=""#)
+        .expect("writing to a String cannot fail");
     push_fixed_trimmed(&mut out, base * 0.75, 2);
     out.push_str(r#"" d=""#);
     for &(cx, cy, r) in &data.dots {
@@ -347,7 +355,7 @@ pub fn ink_svg(
             (&over, SALT_PENCIL[1], 1.5, "0.45"),
             (&under, SALT_PENCIL[2], 1.5, "0.18"),
         ];
-        write!(out, r#"<g fill="none" stroke="{PENCIL}" stroke-linecap="round" stroke-linejoin="round">"#)
+        write!(out, r#"<g fill="none" stroke="{pencil}" stroke-linecap="round" stroke-linejoin="round">"#)
             .expect("writing to a String cannot fail");
         for (lines, salt, factor, opacity) in passes {
             write!(out, r#"<path stroke-opacity="{opacity}" stroke-width=""#).expect("writing to a String cannot fail");
@@ -361,38 +369,44 @@ pub fn ink_svg(
         }
         out.push_str("</g>");
     }
+    svg_frame(&mut out, grid, s, base, ink, style);
     out.push_str("</svg>");
     out
 }
 
-fn push_rgb(out: &mut String, rgb: [f64; 3], op: &str) {
-    for c in rgb {
-        push_fixed_trimmed(out, c, 3);
-        out.push(' ');
-    }
-    out.push_str(op);
-    out.push('\n');
+/// `colour` as if drawn at `opacity` on white, since the PDF has no
+/// transparency.
+fn faded(colour: Colour, opacity: f64) -> Colour {
+    Colour(colour.0.map(|c| (f64::from(c) * opacity + 255.0 * (1.0 - opacity)).round() as u8))
 }
 
 /// The uncompressed page content stream of a hand-drawn PDF.
 #[must_use]
-pub fn ink_pdf_content(grid: &Grid, options: &PdfOptions, seed: u64) -> String {
-    let PageLayout { s, left_margin, top_margin, .. } = PageLayout::new(grid, options);
+pub fn ink_pdf_content(
+    grid: &Grid,
+    options: &PdfOptions,
+    solution: Option<&[(isize, isize)]>,
+    seed: u64,
+    style: &Style,
+) -> String {
+    let layout = pdf_layout(grid, options, style);
+    let s = layout.s;
     let pen = Pen::new(s, seed);
-    let data = path_data(grid, s, options.draw_with_curves, None);
-    let tiles = flat_tiles(&data.tiles, pen.step);
+    let curves = style.corners.map_or(options.draw_with_curves, |c| c == Corners::Round);
+    let data = path_data(grid, s, curves, solution);
+    let tiles = flat_tiles(&tile_paths(s, options.draw_with_curves, style, data.tiles), pen.step);
+    let ink = style.wall_colour.unwrap_or(INK);
+    let pencil = style.solution_colour.unwrap_or(PENCIL);
 
-    // no background, so the page shows through
-    let mut out = String::from("1 J 1 j\n");
+    // no background unless asked for, so the page shows through
+    let mut out = String::new();
+    pdf_background(&mut out, &layout, style);
+    out.push_str("q\n1 J 1 j\n");
     // the maze is drawn as in the SVG, top down, so flip it onto the page
-    out.push_str("1 0 0 -1 ");
-    push_fixed_trimmed(&mut out, left_margin, 3);
-    out.push(' ');
-    push_fixed_trimmed(&mut out, top_margin + grid.height() as f64 * s, 3);
-    out.push_str(" cm\n");
-    push_rgb(&mut out, INK_RGB, "RG");
+    pdf_flip(&mut out, grid, &layout);
+    ink.push_pdf(&mut out, "RG");
 
-    let base = base_width(s);
+    let base = style.line.unwrap_or_else(|| base_width(s));
     for (factor, d) in WIDTHS.iter().zip(walls(grid, s, &pen, &tiles, Format::Pdf)) {
         push_fixed_trimmed(&mut out, base * factor, 3);
         out.push_str(" w\n");
@@ -400,7 +414,7 @@ pub fn ink_pdf_content(grid: &Grid, options: &PdfOptions, seed: u64) -> String {
         out.push_str("S\n");
     }
 
-    push_rgb(&mut out, DOT_RGB, "rg");
+    pencil.push_pdf(&mut out, "rg");
     push_fixed_trimmed(&mut out, base * 0.75, 3);
     out.push_str(" w\n");
     for &(cx, cy, r) in &data.dots {
@@ -408,57 +422,41 @@ pub fn ink_pdf_content(grid: &Grid, options: &PdfOptions, seed: u64) -> String {
         push_polyline(&mut out, &points, Format::Pdf);
         out.push_str("b\n");
     }
+
+    // the solution in pencil, faded rather than see-through
+    if !data.over.is_empty() {
+        let over = flatten(&data.over, pen.step);
+        let under = flatten(&data.under, pen.step);
+        for (lines, salt, factor, opacity) in
+            [(&over, SALT_PENCIL[0], 2.2, 0.55), (&over, SALT_PENCIL[1], 1.5, 0.75), (&under, SALT_PENCIL[2], 1.5, 0.3)]
+        {
+            faded(pencil, opacity).push_pdf(&mut out, "RG");
+            push_fixed_trimmed(&mut out, base * factor, 3);
+            out.push_str(" w\n");
+            for line in lines {
+                let points: Vec<Point> = line.iter().map(|&p| pen.wobble(p, salt)).collect();
+                push_polyline(&mut out, &points, Format::Pdf);
+            }
+            out.push_str("S\n");
+        }
+    }
+    out.push_str("Q\n");
+    pdf_frame(&mut out, grid, &layout, base, ink, style);
     out
 }
 
-/// Render the maze as a complete, hand-drawn single-page PDF document.
+/// Render the maze (and optionally its solution) as a complete, hand-drawn
+/// single-page PDF document.
 #[must_use]
-pub fn ink_pdf(grid: &Grid, options: &PdfOptions, seed: u64) -> Vec<u8> {
-    let content = ink_pdf_content(grid, options, seed);
-    let stream = zlib_compress(content.as_bytes());
-    let layout = PageLayout::new(grid, options);
-
-    let date = pdf_date();
-    let mut media_box = String::from("0 0 ");
-    push_fixed_trimmed(&mut media_box, layout.page_width, 3);
-    media_box.push(' ');
-    push_fixed_trimmed(&mut media_box, layout.page_height, 3);
-    let page = format!("<<\n/Contents 5 0 R /MediaBox [ {media_box} ] /Parent 2 0 R /Resources <<\n>> /Type /Page\n>>");
-    let info = format!(
-        "<<\n/Author (Dale O'Brien) /CreationDate ({date}) /Creator (maze-rs) /ModDate ({date}) /Producer (maze-rs) /Title (Maze)\n>>"
-    );
-    let contents = [
-        format!("<<\n/Filter /FlateDecode /Length {}\n>>\nstream\n", stream.len()).as_bytes(),
-        &stream,
-        b"\nendstream",
-    ]
-    .concat();
-    let objects: [&[u8]; 5] = [
-        b"<<\n/Pages 2 0 R /Type /Catalog\n>>",
-        b"<<\n/Count 1 /Kids [ 3 0 R ] /Type /Pages\n>>",
-        page.as_bytes(),
-        info.as_bytes(),
-        &contents,
-    ];
-
-    let mut out: Vec<u8> = b"%PDF-1.4\n%\x93\x8c\x8b\x9e maze-rs generated PDF document\n".to_vec();
-    let mut offsets = Vec::with_capacity(objects.len());
-    for (i, body) in objects.iter().enumerate() {
-        offsets.push(out.len());
-        out.extend_from_slice(format!("{} 0 obj\n", i + 1).as_bytes());
-        out.extend_from_slice(body);
-        out.extend_from_slice(b"\nendobj\n");
-    }
-    let xref = out.len();
-    let size = objects.len() + 1;
-    let mut table = format!("xref\n0 {size}\n0000000000 65535 f \n");
-    for offset in offsets {
-        writeln!(table, "{offset:010} 00000 n ").expect("writing to a String cannot fail");
-    }
-    write!(table, "trailer\n<<\n/Info 4 0 R\n/Root 1 0 R\n/Size {size}\n>>\nstartxref\n{xref}\n%%EOF\n")
-        .expect("writing to a String cannot fail");
-    out.extend_from_slice(table.as_bytes());
-    out
+pub fn ink_pdf(
+    grid: &Grid,
+    options: &PdfOptions,
+    solution: Option<&[(isize, isize)]>,
+    seed: u64,
+    style: &Style,
+) -> Vec<u8> {
+    let content = ink_pdf_content(grid, options, solution, seed, style);
+    pdf_document(&content, &pdf_layout(grid, options, style), &[])
 }
 
 #[cfg(test)]
@@ -490,8 +488,8 @@ mod tests {
     fn same_seed_same_drawing() {
         let mut rng = crate::random::Rng::from_str_seed("ink");
         let grid = crate::maze::create_maze(10, 12, 50, false, &mut rng);
-        let a = ink_svg(&grid, PageSize::A4, true, None, seed_from_id("ink"));
-        assert_eq!(a, ink_svg(&grid, PageSize::A4, true, None, seed_from_id("ink")));
-        assert_ne!(a, ink_svg(&grid, PageSize::A4, true, None, seed_from_id("other")));
+        let a = ink_svg(&grid, PageSize::A4, true, None, seed_from_id("ink"), &Style::default());
+        assert_eq!(a, ink_svg(&grid, PageSize::A4, true, None, seed_from_id("ink"), &Style::default()));
+        assert_ne!(a, ink_svg(&grid, PageSize::A4, true, None, seed_from_id("other"), &Style::default()));
     }
 }

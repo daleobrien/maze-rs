@@ -4,8 +4,9 @@ use std::process::ExitCode;
 use maze::random::Rng;
 use maze::renderers::ink::{ink_pdf, ink_svg, seed_from_id};
 use maze::renderers::pdf::{pdf_render, PdfOptions};
+use maze::renderers::style::{styled_pdf, styled_svg, Colour, Corners, DeadEnds, Style};
 use maze::renderers::svg::svg_render;
-use maze::renderers::text::text_render;
+use maze::renderers::text::{text_render, text_render_solved};
 use maze::renderers::PageSize;
 use maze::{create_maze, find_solution};
 
@@ -21,9 +22,13 @@ impl Command {
     /// The options this command's usage line accepts.
     fn allowed_options(&self) -> &'static [char] {
         match self {
-            Command::Pdf { .. } => &['W', 'H', 'p', 'd', 'S', 'L', 'O', 'i', 'I'],
-            Command::Text => &['W', 'H', 'p', 'd', 'L', 'i'],
-            Command::Svg { .. } => &['W', 'H', 'p', 'd', 'S', 'L', 'i', 's', 'I'],
+            Command::Pdf { .. } => {
+                &['W', 'H', 'p', 'd', 'S', 'L', 'O', 'i', 's', 'I', 'c', 'w', 'e', 'g', 'l', 'k', 'r', 'b', 'F']
+            }
+            Command::Text => &['W', 'H', 'p', 'd', 'L', 'i', 's'],
+            Command::Svg { .. } => {
+                &['W', 'H', 'p', 'd', 'S', 'L', 'i', 's', 'I', 'c', 'w', 'e', 'g', 'l', 'k', 'r', 'b', 'F']
+            }
         }
     }
 }
@@ -37,6 +42,15 @@ struct Options {
     add_a_loop: bool,
     straight: bool,
     ink: bool,
+    frame: bool,
+    corners: Option<String>,
+    corridor: Option<String>,
+    dead_ends: Option<String>,
+    bridge_gap: Option<String>,
+    line: Option<String>,
+    wall_colour: Option<String>,
+    solution_colour: Option<String>,
+    background: Option<String>,
     page: Option<String>,
     orientation: Option<String>,
     maze_id: Option<String>,
@@ -51,6 +65,15 @@ impl Options {
             ('L', None) => return set_flag(&mut self.add_a_loop),
             ('S', None) => return set_flag(&mut self.straight),
             ('I', None) => return set_flag(&mut self.ink),
+            ('F', None) => return set_flag(&mut self.frame),
+            ('c', Some(value)) => (&mut self.corners, value),
+            ('w', Some(value)) => (&mut self.corridor, value),
+            ('e', Some(value)) => (&mut self.dead_ends, value),
+            ('g', Some(value)) => (&mut self.bridge_gap, value),
+            ('l', Some(value)) => (&mut self.line, value),
+            ('k', Some(value)) => (&mut self.wall_colour, value),
+            ('r', Some(value)) => (&mut self.solution_colour, value),
+            ('b', Some(value)) => (&mut self.background, value),
             ('W', Some(value)) => (&mut self.width, value),
             ('H', Some(value)) => (&mut self.height, value),
             ('d', Some(value)) => (&mut self.density, value),
@@ -103,6 +126,15 @@ const OPTIONS: &[OptionSpec] = &[
     flag('L', None),
     flag('S', None),
     flag('I', Some("ink")),
+    valued('c', Some("corners")),
+    valued('w', Some("corridor")),
+    valued('e', Some("dead-ends")),
+    valued('g', Some("bridge-gap")),
+    valued('l', Some("line")),
+    valued('k', Some("wall-colour")),
+    valued('r', Some("solution-colour")),
+    valued('b', Some("background")),
+    flag('F', Some("frame")),
     valued('p', None),
     valued('O', Some("orientation")),
     valued('i', Some("maze_id")),
@@ -120,6 +152,12 @@ enum Exit {
         value: String,
     },
     TooSmall,
+    /// A style option with a value it doesn't accept.
+    InvalidOption {
+        name: &'static str,
+        value: String,
+        expected: &'static str,
+    },
     InvalidPage(String),
     Write {
         path: String,
@@ -145,6 +183,9 @@ impl Exit {
                 eprintln!("ValueError: invalid literal for int() with base 10: '{value}' ({name})");
             }
             Exit::TooSmall => eprintln!("Width and height must be at least 1"),
+            Exit::InvalidOption { name, value, expected } => {
+                eprintln!("{name} can't be '{value}': expected {expected}")
+            }
             Exit::InvalidPage(page) => {
                 println!("Page size can only be A4, Letter, or A0");
                 println!("e.g.  -p A4");
@@ -255,6 +296,57 @@ fn write_file(path: &str, contents: impl AsRef<[u8]>) -> Result<(), Exit> {
     std::fs::write(path, contents).map_err(|error| Exit::Write { path: path.to_owned(), error })
 }
 
+/// Read an option's value with `parse`, or report what it should have been.
+fn parse_option<T>(
+    name: &'static str,
+    value: Option<&str>,
+    expected: &'static str,
+    parse: impl Fn(&str) -> Option<T>,
+) -> Result<Option<T>, Exit> {
+    value.map(|v| parse(v).ok_or_else(|| Exit::InvalidOption { name, value: v.to_owned(), expected })).transpose()
+}
+
+/// A number in `range`.
+fn number_in(range: std::ops::RangeInclusive<f64>) -> impl Fn(&str) -> Option<f64> {
+    move |v| v.trim().parse::<f64>().ok().filter(|x| range.contains(x))
+}
+
+/// The style options, checked.
+fn parse_style(options: &Options, maze_id: &str) -> Result<Style, Exit> {
+    let colour = "a colour like #e51919 or #333";
+    Ok(Style {
+        corners: parse_option("--corners", options.corners.as_deref(), "round, bevel or square", |v| match v {
+            "round" => Some(Corners::Round),
+            "bevel" => Some(Corners::Bevel),
+            "square" => Some(Corners::Square),
+            _ => None,
+        })?,
+        dead_ends: parse_option("--dead-ends", options.dead_ends.as_deref(), "bulb, round or flat", |v| match v {
+            "bulb" => Some(DeadEnds::Bulb),
+            "round" => Some(DeadEnds::Round),
+            "flat" => Some(DeadEnds::Flat),
+            _ => None,
+        })?,
+        corridor: parse_option(
+            "--corridor",
+            options.corridor.as_deref(),
+            "a number from 0.2 to 0.9",
+            number_in(0.2..=0.9),
+        )?,
+        bridge_gap: parse_option(
+            "--bridge-gap",
+            options.bridge_gap.as_deref(),
+            "a number from 0 to 0.15",
+            number_in(0.0..=0.15),
+        )?,
+        line: parse_option("--line", options.line.as_deref(), "a number from 0.1 to 20", number_in(0.1..=20.0))?,
+        wall_colour: parse_option("--wall-colour", options.wall_colour.as_deref(), colour, Colour::parse)?,
+        solution_colour: parse_option("--solution-colour", options.solution_colour.as_deref(), colour, Colour::parse)?,
+        background: parse_option("--background", options.background.as_deref(), colour, Colour::parse)?,
+        frame: options.frame.then(|| maze_id.to_owned()),
+    })
+}
+
 fn run(Args { command, options }: Args) -> Result<(), Exit> {
     let width = parse_int("--width", options.width.as_deref(), "21")?;
     let height = parse_int("--height", options.height.as_deref(), "30")?;
@@ -265,7 +357,7 @@ fn run(Args { command, options }: Args) -> Result<(), Exit> {
     };
 
     // allow the same maze to be generated if a maze_id is given.
-    let maze_id = options.maze_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let maze_id = options.maze_id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let mut rng = Rng::from_str_seed(&maze_id);
     let ink_seed = seed_from_id(&maze_id);
 
@@ -274,32 +366,51 @@ fn run(Args { command, options }: Args) -> Result<(), Exit> {
 
     let grid = create_maze(width, height, density, options.add_a_loop, &mut rng);
     let draw_with_curves = !options.straight;
-    let options_ink = options.ink;
+    let style = parse_style(&options, &maze_id)?;
+    let solve = || find_solution(&grid);
 
     match command {
         Command::Pdf { filename } => {
             let landscape = options.orientation.as_deref() == Some("L");
-            let options = PdfOptions { draw_with_curves, page, landscape };
-            let pdf = if options_ink { ink_pdf(&grid, &options, ink_seed) } else { pdf_render(&grid, &options) };
-            write_file(&filename, pdf)
+            let pdf_options = PdfOptions { draw_with_curves, page, landscape };
+            // the plain PDF is drawn upside down from the SVG, with other
+            // start and end cells, so a solution needs the styled renderer
+            // for the maze too
+            let render = |solution: Option<&[(isize, isize)]>| {
+                if options.ink {
+                    ink_pdf(&grid, &pdf_options, solution, ink_seed, &style)
+                } else if style.is_plain() && options.solution.is_none() {
+                    pdf_render(&grid, &pdf_options)
+                } else {
+                    styled_pdf(&grid, &pdf_options, solution, &style)
+                }
+            };
+            if let Some(solution_filename) = &options.solution {
+                write_file(solution_filename, render(solve().as_deref()))?;
+            }
+            write_file(&filename, render(None))
         }
         // to screen
         Command::Text => {
             print!("{}", text_render(&grid));
+            if let Some(solution_filename) = &options.solution {
+                write_file(solution_filename, text_render_solved(&grid, &solve().unwrap_or_default()))?;
+            }
             Ok(())
         }
         Command::Svg { filename } => {
             let render = |solution: Option<&[(isize, isize)]>| {
                 if options.ink {
-                    ink_svg(&grid, page, draw_with_curves, solution, ink_seed)
-                } else {
+                    ink_svg(&grid, page, draw_with_curves, solution, ink_seed, &style)
+                } else if style.is_plain() {
                     svg_render(&grid, page, draw_with_curves, solution)
+                } else {
+                    styled_svg(&grid, page, draw_with_curves, solution, &style)
                 }
             };
             let svg = render(None);
             if let Some(solution_filename) = &options.solution {
-                let solution = find_solution(&grid);
-                write_file(solution_filename, render(solution.as_deref()))?;
+                write_file(solution_filename, render(solve().as_deref()))?;
             }
             write_file(&filename, svg)
         }

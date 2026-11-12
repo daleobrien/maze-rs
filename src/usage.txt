@@ -15,9 +15,9 @@ https://gist.github.com/856138
 
 Usage:
   maze -h
-  maze pdf FILENAME [-W WIDTH] [-H HEIGHT] [-p PAGE_SIZE] [-d DENSITY] [-S] [-L] [-I] [-O ORIENTATION] [-i MAZE_ID]
-  maze text [-W WIDTH] [-H HEIGHT] [-p PAGE_SIZE] [-d DENSITY] [-L] [-i MAZE_ID]
-  maze svg FILENAME [-W WIDTH] [-H HEIGHT] [-p PAGE_SIZE] [-d DENSITY] [-S] [-L] [-I] [-i MAZE_ID] [-s SOLUTION_FILENAME]
+  maze pdf FILENAME [-W WIDTH] [-H HEIGHT] [-p PAGE_SIZE] [-d DENSITY] [-S] [-L] [-I] [-O ORIENTATION] [-i MAZE_ID] [-s SOLUTION_FILENAME] [STYLE]
+  maze text [-W WIDTH] [-H HEIGHT] [-p PAGE_SIZE] [-d DENSITY] [-L] [-i MAZE_ID] [-s SOLUTION_FILENAME]
+  maze svg FILENAME [-W WIDTH] [-H HEIGHT] [-p PAGE_SIZE] [-d DENSITY] [-S] [-L] [-I] [-i MAZE_ID] [-s SOLUTION_FILENAME] [STYLE]
 
 Options:
   -h, --help                        Show this help message and exit
@@ -38,9 +38,26 @@ Options:
 
   -i --maze_id MAZE_ID              Identify which maze, otherwise a random maze will be generated
 
-  -s --solution SOLUTION_FILENAME   Save the solution to the maze to a file
+  -s --solution SOLUTION_FILENAME   Save the solution to the maze to a file (text: the
+                                    cells on the way are drawn in heavy lines)
+
+Style options (svg and pdf; without any, the output is exactly as before):
+
+  --corners round|bevel|square      Corner shape [default: round, square with -S]
+  --corridor FRACTION               Corridor width as a fraction of a cell, 0.2 to 0.9 [default: 0.6]
+  --dead-ends bulb|round|flat       How dead ends finish [default: bulb]
+  --bridge-gap FRACTION             Gap where a passage goes under a bridge, 0 to 0.15 [default: 0]
+  --line WIDTH                      Wall width in px (svg) or pt (pdf)
+  --wall-colour COLOUR              Wall colour, e.g. #1d3557
+  --solution-colour COLOUR          Solution and start/end colour [default: #e51919]
+  --background COLOUR               Background colour [default: none]
+  -F --frame                        Frame the maze, with START and FINISH arrows and a footer
+
+A pdf with a solution, or with any style option, is drawn the same way up as
+the svg, starting at the top left.
 
 Examples:
 
 maze pdf my_new_maze.pdf
+maze svg maze.svg -s solved.svg --corners bevel --frame
 

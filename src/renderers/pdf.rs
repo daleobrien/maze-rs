@@ -553,13 +553,16 @@ pub(crate) struct PageLayout {
 
 impl PageLayout {
     pub fn new(grid: &Grid, options: &PdfOptions) -> Self {
+        Self::with_margins(grid, options, 15.0, 15.0)
+    }
+
+    /// The layout with at least `left_margin` points at the sides and
+    /// `top_margin` at the top and bottom.
+    pub fn with_margins(grid: &Grid, options: &PdfOptions, mut left_margin: f64, mut top_margin: f64) -> Self {
         let (mut page_width, mut page_height) = page_size(options.page);
         if options.landscape {
             std::mem::swap(&mut page_width, &mut page_height);
         }
-
-        let mut left_margin = 15.0;
-        let mut top_margin = 15.0;
 
         // cells must be square, it's the math!, I'm not doing it again.
         // so scale the width if the height will go over the page
