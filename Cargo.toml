@@ -5,9 +5,22 @@ edition = "2021"
 description = "Application that generates weave mazes (Rust port of the Python maze generator)"
 license = "MIT"
 
+[features]
+default = ["pdf", "cli"]
+# Compressed PDF output. Without it (as in WebAssembly) PDFs are written
+# uncompressed and the library needs nothing outside the standard library.
+pdf = ["dep:flate2"]
+# The `maze` command line program, which makes up random maze ids.
+cli = ["pdf", "dep:uuid"]
+
 [dependencies]
-flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
-uuid = { version = "1", features = ["v4"] }
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"], optional = true }
+uuid = { version = "1", features = ["v4"], optional = true }
+
+[[bin]]
+name = "maze"
+path = "src/main.rs"
+required-features = ["cli"]
 
 [dev-dependencies]
 criterion = "0.5"

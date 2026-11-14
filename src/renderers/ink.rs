@@ -227,11 +227,36 @@ impl Ink {
 
     /// A pencil pass over the solution, `lines`, wobbled with `salt`.
     fn push_pass(&self, out: &mut String, lines: &[Vec<Point>], salt: u64, format: Format) {
-        for line in lines {
-            let points: Vec<Point> = line.iter().map(|&p| self.pen.wobble(p, salt)).collect();
-            push_polyline(out, &points, format);
-        }
+        push_pass(out, &self.pen, lines, salt, format);
     }
+}
+
+/// A pencil pass over `lines`, wobbled with `salt`.
+fn push_pass(out: &mut String, pen: &Pen, lines: &[Vec<Point>], salt: u64, format: Format) {
+    for line in lines {
+        let points: Vec<Point> = line.iter().map(|&p| pen.wobble(p, salt)).collect();
+        push_polyline(out, &points, format);
+    }
+}
+
+/// Append a trail in pencil, as an SVG group: gone over twice where it is on
+/// top, and once lightly where it passes under a crossing. `base` is the width
+/// of the middle pen and `colour` a `#rrggbb`.
+fn push_pencil(out: &mut String, pen: &Pen, over: &[Vec<Point>], under: &[Vec<Point>], base: f64, colour: &str) {
+    let passes = [
+        (over, SALT_PENCIL[0], 2.2, "0.45"),
+        (over, SALT_PENCIL[1], 1.5, "0.45"),
+        (under, SALT_PENCIL[2], 1.5, "0.18"),
+    ];
+    w!(out, r#"<g fill="none" stroke="{colour}" stroke-linecap="round" stroke-linejoin="round">"#);
+    for (lines, salt, factor, opacity) in passes {
+        w!(out, r#"<path stroke-opacity="{opacity}" stroke-width=""#);
+        push_fixed_trimmed(out, base * factor, 2);
+        out.push_str(r#"" d=""#);
+        push_pass(out, pen, lines, salt, Format::Svg);
+        out.push_str(r#""/>"#);
+    }
+    out.push_str("</g>");
 }
 
 /// Render the maze (and optionally its solution) as a hand-drawn SVG.
@@ -245,7 +270,36 @@ pub fn ink_svg(
     style: &Style,
 ) -> String {
     let (width, s) = svg_scale(grid, page);
-    let (w, h) = (width * s, grid.height() as f64 * s);
+    ink_svg_sized(grid, width * s, s, draw_with_curves, solution, seed, style)
+}
+
+/// Render the maze (and optionally its solution) as a hand-drawn SVG with
+/// cells of side `s`, exactly as wide as the maze rather than fitted to a page:
+/// cell `(x, y)` covers `x * s` to `(x + 1) * s` across and `y * s` to
+/// `(y + 1) * s` down. Draw a trail over it with [`pencil_svg`].
+#[must_use]
+pub fn ink_svg_cells(
+    grid: &Grid,
+    s: f64,
+    draw_with_curves: bool,
+    solution: Option<Solution>,
+    seed: u64,
+    style: &Style,
+) -> String {
+    ink_svg_sized(grid, grid.width() as f64 * s, s, draw_with_curves, solution, seed, style)
+}
+
+/// An inked maze `w` wide, with cells of side `s`.
+fn ink_svg_sized(
+    grid: &Grid,
+    w: f64,
+    s: f64,
+    draw_with_curves: bool,
+    solution: Option<Solution>,
+    seed: u64,
+    style: &Style,
+) -> String {
+    let h = grid.height() as f64 * s;
     let ink = Ink::new(grid, s, draw_with_curves, solution, seed, style);
     let Pens { line: base, wall, solution: pencil } = ink.pens;
     let (ink_hex, pencil) = (wall.hex(), pencil.hex());
@@ -276,23 +330,30 @@ pub fn ink_svg(
     // the solution, gone over twice in pencil, and once lightly where it's
     // under a crossing
     if !ink.over.is_empty() {
-        let passes = [
-            (&ink.over, SALT_PENCIL[0], 2.2, "0.45"),
-            (&ink.over, SALT_PENCIL[1], 1.5, "0.45"),
-            (&ink.under, SALT_PENCIL[2], 1.5, "0.18"),
-        ];
-        w!(out, r#"<g fill="none" stroke="{pencil}" stroke-linecap="round" stroke-linejoin="round">"#);
-        for (lines, salt, factor, opacity) in passes {
-            w!(out, r#"<path stroke-opacity="{opacity}" stroke-width=""#);
-            push_fixed_trimmed(&mut out, base * factor, 2);
-            out.push_str(r#"" d=""#);
-            ink.push_pass(&mut out, lines, salt, Format::Svg);
-            out.push_str(r#""/>"#);
-        }
-        out.push_str("</g>");
+        push_pencil(&mut out, &ink.pen, &ink.over, &ink.under, base, &pencil);
     }
     svg_frame(&mut out, grid, s, base, wall, style);
     out.push_str("</svg>");
+    out
+}
+
+/// `trail` (cells as in a [`Solution`], from where it starts to where it ends)
+/// drawn in pencil of `colour`, as an SVG group to lay over [`ink_svg_cells`]
+/// with the same `grid`, `s`, `draw_with_curves` and `seed`: it is drawn just as
+/// the solution is, gone over twice, and lightly where it passes under a
+/// crossing. Empty for a trail of fewer than two cells.
+#[must_use]
+pub fn pencil_svg(grid: &Grid, s: f64, draw_with_curves: bool, trail: Solution, seed: u64, colour: Colour) -> String {
+    if trail.len() < 2 {
+        return String::new();
+    }
+    let pen = Pen::new(s, seed);
+    let traces = Traces::new(grid, s, draw_with_curves, Some(trail));
+    let over = flatten(&parse_path(&traces.over), pen.step);
+    let under = flatten(&parse_path(&traces.under), pen.step);
+    // the middle pen is 7.5% of a cell wide, as in the maze
+    let mut out = String::new();
+    push_pencil(&mut out, &pen, &over, &under, s * 0.075, &colour.hex());
     out
 }
 
@@ -378,6 +439,41 @@ mod tests {
             let n = noise(x, y, 7);
             assert!((-1.0..=1.0).contains(&n));
             assert!((noise(x + 1e-6, y, 7) - n).abs() < 1e-3);
+        }
+    }
+
+    fn pencil_maze() -> (Grid, Vec<(isize, isize)>) {
+        let mut rng = crate::random::Rng::from_str_seed("pencil");
+        let grid = crate::maze::create_maze(12, 9, 50, false, &mut rng);
+        let solution = crate::maze::find_solution(&grid).expect("a maze has a solution");
+        (grid, solution)
+    }
+
+    #[test]
+    fn a_trail_in_pencil_is_drawn_as_the_solution_is() {
+        let (grid, solution) = pencil_maze();
+        let solved = ink_svg_cells(&grid, 40.0, true, Some(&solution), 7, &Style::default());
+        let pencil = pencil_svg(&grid, 40.0, true, &solution, 7, PENCIL);
+        assert!(!pencil.is_empty());
+        assert!(solved.contains(&pencil), "the solution is the same pencil marks");
+        assert!(solved.starts_with(r#"<svg id="maze" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 480.0 360.0""#));
+    }
+
+    #[test]
+    fn any_stretch_of_a_trail_can_be_pencilled() {
+        let (grid, solution) = pencil_maze();
+        assert!(pencil_svg(&grid, 40.0, true, &solution[..1], 7, PENCIL).is_empty());
+        for start in 0..solution.len() - 1 {
+            for end in start + 2..=solution.len() {
+                let mut trail = solution[start..end].to_vec();
+                for _ in 0..2 {
+                    let pencil = pencil_svg(&grid, 40.0, true, &trail, 7, PENCIL);
+                    assert!(pencil.contains(" d=\"M"), "{trail:?} draws something");
+                    assert!(!pencil.contains("NaN"));
+                    // and the same stretch walked the other way
+                    trail.reverse();
+                }
+            }
         }
     }
 

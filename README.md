@@ -67,6 +67,21 @@ or a style is drawn the same way up as the SVG, starting at the top left
 (`src/renderers/style.rs`). The plain PDF is unchanged. Add `OPTS="..."` to
 `make svg`, `make pdf` or `make text` to pass any of these.
 
+## As a library
+
+The generator and the renderers are a library too (`maze`), which builds for
+WebAssembly with the default features turned off:
+
+```toml
+maze = { git = "https://github.com/daleobrien/maze-rs", default-features = false }
+```
+
+The `pdf` feature compresses PDFs (with it off they are written uncompressed)
+and `cli` builds the `maze` program; both are on by default. For a page that
+draws the maze itself, `ink_svg_cells` inks a maze at a given cell size,
+`pencil_svg` pencils any trail of cells over it the way the solution is drawn,
+and `moves` gives the cells one move away, past any crossings.
+
 ## How it works
 
 - Each kind of tile is drawn once and reused in every cell of that kind

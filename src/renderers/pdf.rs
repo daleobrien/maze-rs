@@ -10,11 +10,14 @@ use std::io::Write;
 use std::ops::Range;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(feature = "pdf")]
 use flate2::write::ZlibEncoder;
+#[cfg(feature = "pdf")]
 use flate2::{Compress, Compression, FlushCompress, Status};
 
 use crate::maze::{Grid, CROSS_EW, CROSS_NS};
 use crate::renderers::{map_bands, page_size, push_fixed_trimmed, used_tiles, Geometry, PageSize, Piece, TILE_KINDS};
+#[cfg(feature = "pdf")]
 use crate::simd::adler32;
 
 /// ReportLab's `fp_str` for a single number, appended to `out`.
@@ -674,6 +677,7 @@ pub fn pdf_content(grid: &Grid, options: &PdfOptions) -> PageContent {
 }
 
 /// Below this a content stream is compressed on one thread.
+#[cfg(feature = "pdf")]
 const PARALLEL_COMPRESS_MIN_BYTES: usize = 1 << 17;
 
 /// Compress `data` into a zlib stream.
@@ -681,6 +685,7 @@ const PARALLEL_COMPRESS_MIN_BYTES: usize = 1 << 17;
 /// Large inputs are split into pieces that are deflated in parallel, each
 /// ending on a byte boundary (a sync flush), so the pieces join into one
 /// ordinary zlib stream, as `pigz` does.
+#[cfg(feature = "pdf")]
 fn zlib_compress(data: &[u8]) -> Vec<u8> {
     if data.len() < PARALLEL_COMPRESS_MIN_BYTES {
         let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
@@ -717,10 +722,12 @@ fn zlib_compress(data: &[u8]) -> Vec<u8> {
     out
 }
 
+#[cfg(feature = "pdf")]
 const ADLER_BASE: u32 = 65_521;
 
 /// The Adler-32 of two pieces joined, from the checksum of each and the
 /// length of the second (zlib's `adler32_combine`).
+#[cfg(feature = "pdf")]
 fn adler32_combine(adler1: u32, adler2: u32, len2: usize) -> u32 {
     let rem = (len2 % ADLER_BASE as usize) as u32;
     let mut sum1 = adler1 & 0xffff;
@@ -800,10 +807,18 @@ pub fn pdf_render(grid: &Grid, options: &PdfOptions) -> Vec<u8> {
 }
 
 /// A content stream, compressed, as a PDF stream object.
+#[cfg(feature = "pdf")]
 pub(crate) fn flate_stream_object(content: &str) -> Vec<u8> {
     let stream = zlib_compress(content.as_bytes());
     [format!("<<\n/Filter /FlateDecode /Length {}\n>>\nstream\n", stream.len()).as_bytes(), &stream, b"\nendstream"]
         .concat()
+}
+
+/// A content stream as a PDF stream object, uncompressed (without the `pdf`
+/// feature).
+#[cfg(not(feature = "pdf"))]
+pub(crate) fn flate_stream_object(content: &str) -> Vec<u8> {
+    [format!("<<\n/Length {}\n>>\nstream\n", content.len()).as_bytes(), content.as_bytes(), b"\nendstream"].concat()
 }
 
 /// A PDF file of the given `version` from its objects, numbered from 1,
@@ -836,6 +851,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(feature = "pdf")]
     fn parallel_compression_round_trips() {
         use std::io::Read;
 

@@ -247,9 +247,21 @@ impl SvgPath {
         }
     }
 
+    /// Draw `trail`, a path of cells as in a [`Solution`], from the middle of its
+    /// first cell to the middle of its last. A solution starts top left and ends
+    /// bottom right, but any trail of two or more cells can be drawn.
     fn render_trace(&mut self, grid: &Grid, trail: Solution) {
         let s = self.s;
         let to_page = |(x, y): (isize, isize)| (x as f64 * s, y as f64 * s);
+        if let &[first, last] = trail {
+            // too short for a turn: just the two half cells, and any crossing
+            let (x, y) = to_page(first);
+            self.trace_start(Self::side(last.0 - first.0, last.1 - first.1), x, y);
+            let (x, y) = to_page(last);
+            self.trace_end(Self::side(first.0 - last.0, first.1 - last.1), x, y);
+            self.trace_crossing(grid, first, last);
+            return;
+        }
         let count = trail.len().saturating_sub(2);
         for (i, w) in trail.windows(3).enumerate() {
             let &[prev, curr, head] = w else { unreachable!("windows of 3") };
@@ -260,46 +272,76 @@ impl SvgPath {
 
             if i == 0 {
                 let (x, y) = to_page(prev);
-                match from {
-                    Side::Top => self.t2(x, y),
-                    Side::Left => self.t4(x, y),
-                    _ => {}
-                }
+                self.trace_start(from, x, y);
             }
             if i + 1 == count {
                 let (x, y) = to_page(head);
-                match to {
-                    Side::Right => self.t8(x, y),
-                    Side::Bottom => self.t1(x, y),
-                    _ => {}
-                }
+                self.trace_end(to, x, y);
             }
 
             if !self.faint {
                 self.trace_tile(from, to, cx, cy);
             }
 
-            // Python floor division
-            let dx = (prev.0 - curr.0).div_euclid(2);
-            let dy = (prev.1 - curr.1).div_euclid(2);
-            let between = (curr.0 + dx, curr.1 + dy);
-            let (px, py) = to_page(between);
-            let prev_tile = grid[(between.0 as usize, between.1 as usize)];
-
-            if dx == 1 || dx == -1 {
-                if prev_tile == CROSS_NS {
-                    self.tg(px, py);
-                } else if prev_tile == CROSS_EW && !self.faint {
-                    self.tc(px, py);
-                }
+            self.trace_crossing(grid, prev, curr);
+        }
+        // the crossing (if any) before the last cell; a solution never has one
+        // there, since crossings are never on the edge of the maze
+        if let [.., prev, last] = trail {
+            if trail.len() > 2 {
+                self.trace_crossing(grid, *prev, *last);
             }
+        }
+    }
 
-            if dy == 1 || dy == -1 {
-                if prev_tile == CROSS_NS && !self.faint {
-                    self.t3(px, py);
-                } else if prev_tile == CROSS_EW {
-                    self.th(px, py);
-                }
+    /// The half of the first cell, at `(x, y)`, on the way out of it: the trail
+    /// enters the next cell from its side `from`.
+    fn trace_start(&mut self, from: Side, x: f64, y: f64) {
+        match from {
+            Side::Top => self.t2(x, y),
+            Side::Left => self.t4(x, y),
+            // only a trail that doesn't start top left goes up or left
+            Side::Bottom => self.t1(x, y),
+            Side::Right => self.t8(x, y),
+        }
+    }
+
+    /// The half of the last cell, at `(x, y)`, on the way into it: the trail
+    /// leaves the cell before from its side `to`.
+    fn trace_end(&mut self, to: Side, x: f64, y: f64) {
+        match to {
+            Side::Right => self.t8(x, y),
+            Side::Bottom => self.t1(x, y),
+            // only a trail that doesn't end bottom right comes from below or the right
+            Side::Left => self.t4(x, y),
+            Side::Top => self.t2(x, y),
+        }
+    }
+
+    /// The crossing the trail passes over or under between `prev` and `curr`, if
+    /// they are two apart.
+    fn trace_crossing(&mut self, grid: &Grid, prev: (isize, isize), curr: (isize, isize)) {
+        let s = self.s;
+        // Python floor division
+        let dx = (prev.0 - curr.0).div_euclid(2);
+        let dy = (prev.1 - curr.1).div_euclid(2);
+        let between = (curr.0 + dx, curr.1 + dy);
+        let (px, py) = (between.0 as f64 * s, between.1 as f64 * s);
+        let prev_tile = grid[(between.0 as usize, between.1 as usize)];
+
+        if dx == 1 || dx == -1 {
+            if prev_tile == CROSS_NS {
+                self.tg(px, py);
+            } else if prev_tile == CROSS_EW && !self.faint {
+                self.tc(px, py);
+            }
+        }
+
+        if dy == 1 || dy == -1 {
+            if prev_tile == CROSS_NS && !self.faint {
+                self.t3(px, py);
+            } else if prev_tile == CROSS_EW {
+                self.th(px, py);
             }
         }
     }

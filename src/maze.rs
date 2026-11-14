@@ -312,6 +312,41 @@ fn get_moves(grid: &Grid, (x, y): (isize, isize)) -> Moves {
     moves
 }
 
+/// The cells one move from `(x, y)` reaches: through each of its passages,
+/// past any crossing in the way, in the order west, east, north, south. This
+/// is how the solution moves, so a player can walk the maze the same way.
+#[must_use]
+pub fn moves(grid: &Grid, (x, y): (usize, usize)) -> Vec<(usize, usize)> {
+    let (x, y) = (x as isize, y as isize);
+    get_moves(grid, (x, y)).map(|(dx, dy)| ((x + dx) as usize, (y + dy) as usize)).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn moves_go_both_ways_and_follow_the_solution() {
+        let mut rng = Rng::from_str_seed("moves");
+        let grid = create_maze(15, 11, 30, false, &mut rng);
+        for y in 0..grid.height() {
+            for x in 0..grid.width() {
+                if is_crossing(grid[(x, y)]) {
+                    continue;
+                }
+                for to in moves(&grid, (x, y)) {
+                    assert!(moves(&grid, to).contains(&(x, y)), "({x}, {y}) to {to:?} and back");
+                }
+            }
+        }
+        let solution = find_solution(&grid).expect("a maze has a solution");
+        for pair in solution.windows(2) {
+            let (from, to) = (pair[0], pair[1]);
+            assert!(moves(&grid, (from.0 as usize, from.1 as usize)).contains(&(to.0 as usize, to.1 as usize)));
+        }
+    }
+}
+
 /// Depth-first search from the top left to the bottom right corner,
 /// returning the cells along the way as `(x, y)`.
 ///
