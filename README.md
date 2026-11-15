@@ -29,8 +29,10 @@ Run `maze` with no arguments to see all the options. The same maze id
 
 Add `-I` (`--ink`) to `svg` or `pdf` to draw the maze in brown ink on a
 transparent background, with every wall wobbling slightly. The wobble is
-seeded from the maze id, so a maze always comes out the same. The solved sample at the top was made
-with:
+seeded from the maze id, so a maze always comes out the same. The start and
+end are drawn as in [Lubra](https://github.com/daleobrien/lubra): the corridor
+opens into a ring with a red dot inside (`--ring` sets its size). The solved
+sample at the top was made with:
 
 ```bash
 maze svg /dev/null -I -s docs/sample-ink-solved.svg -W 30 -H 21 -i readme
@@ -55,6 +57,7 @@ out and the output is byte for byte what it was before.
 | `--line` | width | Wall thickness in px (SVG) or pt (PDF). |
 | `--wall-colour`, `--solution-colour`, `--background` | `#rrggbb` | Colours. |
 | `-F`, `--frame` | | A frame with START and FINISH arrows and a footer with the maze id and size. |
+| `--ring` | 0 to 0.48 | With `-I`, the radius of the start and end rings, as a fraction of a cell (normally 0.46); 0 draws the old dot. |
 
 ```bash
 maze svg maze.svg -s solved.svg --corners bevel --corridor 0.5 --frame

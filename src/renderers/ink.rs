@@ -19,7 +19,7 @@ use crate::maze::Grid;
 use crate::renderers::frame::{pdf_background, pdf_document, pdf_flip, pdf_frame, pdf_layout, svg_frame, svg_open};
 use crate::renderers::path::{flatten, parse_path, Chain, Point};
 use crate::renderers::pdf::PdfOptions;
-use crate::renderers::style::{Colour, Pens, Style};
+use crate::renderers::style::{Colour, Pens, Style, CORRIDOR, RING};
 use crate::renderers::svg::{dots, is_dot, plain_tiles, svg_scale, Traces};
 use crate::renderers::{map_bands, push_fixed_trimmed, push_pair, used_tiles, PageSize, Solution};
 
@@ -144,8 +144,111 @@ fn push_polyline(out: &mut String, points: &[Point], format: Format) {
     }
 }
 
+/// Append a wobbled wall to the path data for each pen width, a few pieces at a
+/// time, each with the pen's width where it is.
+fn push_wall(out: &mut [String; 3], pen: &Pen, wobbled: &[Point], format: Format) {
+    // consecutive chunks share a point, so the pen never lifts
+    let mut start = 0;
+    while start + 1 < wobbled.len() {
+        let end = (start + CHUNK).min(wobbled.len() - 1);
+        let width = pen.width_at(wobbled[(start + end) / 2]);
+        push_polyline(&mut out[width], &wobbled[start..=end], format);
+        start = end;
+    }
+}
+
+/// Points along the arc of radius `r` round `centre` from angle `from` to angle
+/// `to` (radians, either way round), at most `step` apart, ends included.
+fn arc(centre: Point, r: f64, from: f64, to: f64, step: f64) -> Vec<Point> {
+    let n = ((to - from).abs() * r / step).ceil().max(1.0) as usize;
+    (0..=n)
+        .map(|k| {
+            let angle = from + (to - from) * k as f64 / n as f64;
+            (centre.0 + r * angle.cos(), centre.1 + r * angle.sin())
+        })
+        .collect()
+}
+
+/// `angle` moved by whole turns to within half a turn of `near`.
+fn near_angle(angle: f64, near: f64) -> f64 {
+    angle - (2.0 * PI) * ((angle - near) / (2.0 * PI)).round()
+}
+
+/// The walls of the start or end cell `(i, j)`, holding `cell`, drawn as Lubra
+/// draws them: each corridor into the cell blends into a ring of radius `ring`
+/// round its middle, so the outline has no corner. Where two corridors meet at a
+/// right angle the ring gives way to a rounded inside corner. `hw` is half a
+/// corridor's width and `s` the side of a cell. As polylines on the page.
+fn ring_walls(cell: u8, (i, j): (usize, usize), s: f64, hw: f64, ring: f64, step: f64) -> Vec<Vec<Point>> {
+    use crate::maze::{E, N, S, W};
+    let centre = (i as f64 * s + s / 2.0, j as f64 * s + s / 2.0);
+    let at = |base: Point, u: Point, a: f64, v: Point, b: f64| (base.0 + u.0 * a + v.0 * b, base.1 + u.1 * a + v.1 * b);
+    // the ways out, as unit directions (y down), in order round the cell
+    let mut ways: Vec<(f64, f64)> = [(N, (0.0, -1.0)), (S, (0.0, 1.0)), (E, (1.0, 0.0)), (W, (-1.0, 0.0))]
+        .into_iter()
+        .filter(|&(flag, _)| cell & flag != 0)
+        .map(|(_, u)| u)
+        .collect();
+    if ways.is_empty() {
+        return vec![arc(centre, ring, 0.0, 2.0 * PI, step)];
+    }
+    ways.sort_by(|a, b| a.1.atan2(a.0).total_cmp(&b.1.atan2(b.0)));
+
+    // A wall blends into the ring on a small circle outside both, as in Lubra.
+    let blend = s * 0.1;
+    let reach = ring + blend;
+    let rise = hw + blend;
+    let run = (reach * reach - rise * rise).max(0.0).sqrt();
+    let alpha = rise.atan2(run);
+
+    (0..ways.len())
+        .map(|k| {
+            let (u, next) = (ways[k], ways[(k + 1) % ways.len()]);
+            // across each corridor, a quarter turn on from it
+            let v = (-u.1, u.0);
+            let w = (-next.1, next.0);
+            let theta = u.1.atan2(u.0);
+            let mut gap = next.1.atan2(next.0) - theta;
+            if gap <= 1e-9 {
+                gap += 2.0 * PI;
+            }
+            // from the cell's side, along this corridor's wall on the `v` side ...
+            let mut points = vec![at(centre, u, s / 2.0, v, hw)];
+            if gap - 2.0 * alpha > 0.05 {
+                // ... round the blend, the ring and the next corridor's blend
+                let b1 = at(centre, u, run, v, rise);
+                let start = (-v.1).atan2(-v.0);
+                let end = near_angle(theta + alpha + PI, start);
+                points.extend(arc(b1, blend, start, end, step));
+                points.extend(arc(centre, ring, theta + alpha, theta + gap - alpha, step).into_iter().skip(1));
+                let b2 = at(centre, next, run, w, -rise);
+                let phi = next.1.atan2(next.0);
+                let start = phi - alpha + PI;
+                let end = near_angle(w.1.atan2(w.0), start);
+                points.extend(arc(b2, blend, start, end, step).into_iter().skip(1));
+            } else {
+                // ... or, where the corridors meet at a right angle, a rounded inside corner
+                let corner = at(centre, u, hw + blend, v, hw + blend);
+                let start = (-v.1).atan2(-v.0);
+                let end = near_angle((-u.1).atan2(-u.0), start);
+                points.extend(arc(corner, blend, start, end, step));
+            }
+            // ... and out along the next corridor's wall on its far side
+            points.push(at(centre, next, s / 2.0, w, -hw));
+            points
+        })
+        .collect()
+}
+
 /// The walls, wobbled, as path data for each pen width.
-fn walls(grid: &Grid, s: f64, pen: &Pen, tiles: &[Vec<Vec<Point>>], format: Format) -> [String; 3] {
+fn walls(
+    grid: &Grid,
+    s: f64,
+    pen: &Pen,
+    tiles: &[Vec<Vec<Point>>],
+    rings: &[Vec<Point>],
+    format: Format,
+) -> [String; 3] {
     let bands = map_bands(grid.height(), grid.width() * 8, |rows| {
         let mut out: [String; 3] = Default::default();
         let mut wobbled = Vec::new();
@@ -158,14 +261,7 @@ fn walls(grid: &Grid, s: f64, pen: &Pen, tiles: &[Vec<Vec<Point>>], format: Form
                 for line in &tiles[usize::from(cell)] {
                     wobbled.clear();
                     wobbled.extend(line.iter().map(|&(x, y)| pen.wobble((x0 + x, y0 + y), 0)));
-                    // consecutive chunks share a point, so the pen never lifts
-                    let mut start = 0;
-                    while start + 1 < wobbled.len() {
-                        let end = (start + CHUNK).min(wobbled.len() - 1);
-                        let width = pen.width_at(wobbled[(start + end) / 2]);
-                        push_polyline(&mut out[width], &wobbled[start..=end], format);
-                        start = end;
-                    }
+                    push_wall(&mut out, pen, &wobbled, format);
                 }
             }
         }
@@ -176,6 +272,11 @@ fn walls(grid: &Grid, s: f64, pen: &Pen, tiles: &[Vec<Vec<Point>>], format: Form
         for (all, part) in out.iter_mut().zip(band) {
             all.push_str(&part);
         }
+    }
+    // the start and end, when drawn as rings
+    for line in rings {
+        let wobbled: Vec<Point> = line.iter().map(|&p| pen.wobble(p, 0)).collect();
+        push_wall(&mut out, pen, &wobbled, format);
     }
     out
 }
@@ -191,6 +292,10 @@ struct Ink {
     under: Vec<Vec<Point>>,
     /// The width of the middle pen, and the colours.
     pens: Pens,
+    /// The radius of the start and end rings, when drawn as Lubra does.
+    ring: Option<f64>,
+    /// Their walls, then: polylines on the page, not yet wobbled.
+    rings: Vec<Vec<Point>>,
 }
 
 impl Ink {
@@ -205,7 +310,19 @@ impl Ink {
             plain_tiles(s, curves, &used).iter().map(|d| parse_path(d)).collect()
         };
         let traces = Traces::new(grid, s, curves, solution);
+        let ring = Some(style.ring.unwrap_or(RING) * s).filter(|&ring| ring > 0.0);
+        let rings = ring.map_or_else(Vec::new, |ring| {
+            let hw = style.corridor.unwrap_or(CORRIDOR) * s / 2.0;
+            let mut cells = vec![(0, 0)];
+            let last = (grid.width() - 1, grid.height() - 1);
+            if last != (0, 0) {
+                cells.push(last);
+            }
+            cells.into_iter().flat_map(|(i, j)| ring_walls(grid[(i, j)], (i, j), s, hw, ring, pen.step)).collect()
+        });
         Ink {
+            ring,
+            rings,
             tiles: chains.iter().map(|chains| flatten(chains, pen.step)).collect(),
             over: flatten(&parse_path(&traces.over), pen.step),
             under: flatten(&parse_path(&traces.under), pen.step),
@@ -220,7 +337,9 @@ impl Ink {
         dots(grid, s)
             .into_iter()
             .map(|(cx, cy, r)| {
-                circle(cx, cy, r * 0.8, self.pen.step).into_iter().map(|p| self.pen.wobble(p, 0)).collect()
+                // in a ring the dot is half its size, as in Lubra
+                let r = self.ring.map_or(r * 0.8, |ring| ring / 2.0);
+                circle(cx, cy, r, self.pen.step).into_iter().map(|p| self.pen.wobble(p, 0)).collect()
             })
             .collect()
     }
@@ -308,7 +427,7 @@ fn ink_svg_sized(
     svg_open(&mut out, w, h, s, style);
 
     w!(out, r#"<g fill="none" stroke="{ink_hex}" stroke-linecap="round" stroke-linejoin="round">"#);
-    for (factor, d) in WIDTHS.iter().zip(walls(grid, s, &ink.pen, &ink.tiles, Format::Svg)) {
+    for (factor, d) in WIDTHS.iter().zip(walls(grid, s, &ink.pen, &ink.tiles, &ink.rings, Format::Svg)) {
         if !d.is_empty() {
             out.push_str(r#"<path stroke-width=""#);
             push_fixed_trimmed(&mut out, base * factor, 2);
@@ -385,7 +504,7 @@ pub fn ink_pdf_content(
     pdf_flip(&mut out, grid, &layout);
     wall.push_pdf(&mut out, "RG");
 
-    for (factor, d) in WIDTHS.iter().zip(walls(grid, s, &ink.pen, &ink.tiles, Format::Pdf)) {
+    for (factor, d) in WIDTHS.iter().zip(walls(grid, s, &ink.pen, &ink.tiles, &ink.rings, Format::Pdf)) {
         push_fixed_trimmed(&mut out, base * factor, 3);
         out.push_str(" w\n");
         out.push_str(&d);

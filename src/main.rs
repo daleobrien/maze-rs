@@ -108,6 +108,7 @@ const OPTIONS: &[OptionSpec] = &[
     valued('r', Some("solution-colour"), DRAWN),
     valued('b', Some("background"), DRAWN),
     flag('F', Some("frame"), DRAWN),
+    valued('n', Some("ring"), DRAWN),
     valued('p', None, ALL),
     valued('O', Some("orientation"), PDF),
     valued('i', Some("maze_id"), ALL),
@@ -305,6 +306,7 @@ fn parse_style(options: &Options, maze_id: &str) -> Result<Style, Exit> {
         solution_colour: parse_option("--solution-colour", options.value('r'), colour, Colour::parse)?,
         background: parse_option("--background", options.value('b'), colour, Colour::parse)?,
         frame: options.flag('F').then(|| maze_id.to_owned()),
+        ring: parse_option("--ring", options.value('n'), "a number from 0 to 0.48", number_in(0.0..=0.48))?,
     })
 }
 

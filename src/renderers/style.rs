@@ -97,16 +97,26 @@ pub struct Style {
     pub background: Option<Colour>,
     /// Draw a frame, START and FINISH arrows and a footer naming this maze id.
     pub frame: Option<String>,
+    /// In ink, the radius of the start and end rings, as a fraction of a cell
+    /// (normally [`RING`]): they are drawn as Lubra draws them, each corridor
+    /// into the cell blending into a ring round its middle, with a dot inside.
+    /// 0 draws no walls there, just a bigger dot.
+    pub ring: Option<f64>,
 }
 
+/// The radius of the start and end rings in ink, as a fraction of a cell, when
+/// the style doesn't set one.
+pub const RING: f64 = 0.46;
+
 /// A corridor's width, as a fraction of a cell, when the style doesn't set one.
-const CORRIDOR: f64 = 0.6;
+pub(crate) const CORRIDOR: f64 = 0.6;
 
 impl Style {
     /// Whether no option is set, so the plain renderers can be used.
     #[must_use]
     pub fn is_plain(&self) -> bool {
-        *self == Style::default()
+        // the ring is only drawn in ink, which has its own renderer
+        Style { ring: None, ..self.clone() } == Style::default()
     }
 
     /// Whether any option changes the shape of the walls.

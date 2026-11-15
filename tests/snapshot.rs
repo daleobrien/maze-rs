@@ -80,6 +80,7 @@ fn styles(id: &str) -> Vec<Style> {
             solution_colour: Colour::parse("#00aa33"),
             background: Colour::parse("#fffaf0"),
             frame: None,
+            ring: Some(0.4),
         },
         Style {
             corners: Some(Corners::Square),
@@ -132,10 +133,10 @@ fn styled_outputs_are_unchanged() {
 }
 
 const STYLED_CASES: &[(&str, usize, usize, i64, bool, &str)] = &[
-    ("abc", 10, 8, 50, false, "a57b24bab08f677caf7aae7f03bb098f345a081a3c9149bec9104e91d46714d6"),
-    ("my-maze", 23, 30, 50, false, "eeaf4f5f4fe899b7e02d1c65f05da6bf7a033fb7895d66dd8759561e3a68300e"),
-    ("loop", 23, 30, 50, true, "e81053e03a93ea6d09cbcb83d9f755cf717170d950fcf41883258f5862d5ad37"),
-    ("dense", 40, 40, 10, false, "7f32e819ce7c84da735a7793243acc16dd5425cf78831853dcdd55c06d1e77d7"),
-    ("tall", 3, 60, 50, false, "4e39d4204ef7420c2fdc6705b3706b8398b29b14b066a46208f7e98a394584b3"),
-    ("one", 1, 1, 50, false, "0dc0dd9772ae3bb09b6f7b6575396edb93a77cf6fe081045f82c06673bed94e3"),
+    ("abc", 10, 8, 50, false, "819da8c26d4309d30706fc7d58d9703de8ca050136f459cf5c7f34df4bdfe609"),
+    ("my-maze", 23, 30, 50, false, "4fd7123695bfecd57d0d3c9d3abfb48f0e703c693688803ca043980d4378a4f4"),
+    ("loop", 23, 30, 50, true, "d36b02e73404df15a8b76a37956f4d8a60269540ff16a9357e5211b82cb8eb44"),
+    ("dense", 40, 40, 10, false, "b042eaa40939dc38bf4fd7d53e6bd9e7503a7ed5dda21403ad3d7dd21fbd9ea1"),
+    ("tall", 3, 60, 50, false, "f93fc832e74259a02801738ca0dde6e052da2f3249ac619bde2cce1e485b852a"),
+    ("one", 1, 1, 50, false, "efb3a56aa353bb593249aefe584ab77593250f8b85dfaed0bdaf76f5cde8417c"),
 ];

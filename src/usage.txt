@@ -52,6 +52,8 @@ Style options (svg and pdf; without any, the output is exactly as before):
   --solution-colour COLOUR          Solution and start/end colour [default: #e51919]
   --background COLOUR               Background colour [default: none]
   -F --frame                        Frame the maze, with START and FINISH arrows and a footer
+  --ring FRACTION                   With -I, the start and end ring's radius as a fraction of a
+                                    cell, 0 to 0.48; 0 draws a dot alone [default: 0.46]
 
 A pdf with a solution, or with any style option, is drawn the same way up as
 the svg, starting at the top left.
