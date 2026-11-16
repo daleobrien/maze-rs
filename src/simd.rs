@@ -37,9 +37,8 @@ fn adler32_scalar(mut a: u32, mut b: u32, data: &[u8]) -> u32 {
 #[cfg(target_arch = "aarch64")]
 fn adler32_neon(data: &[u8]) -> u32 {
     use std::arch::aarch64::{
-        uint16x8_t, uint32x4_t, vaddq_u32, vaddvq_u32, vaddw_high_u8, vaddw_u8, vdupq_n_u16, vdupq_n_u32,
-        vget_low_u16, vget_low_u8, vld1q_u16, vld1q_u8, vmlal_high_u16, vmlal_u16, vmull_u16,
-        vpadalq_u16, vpaddlq_u8,
+        uint16x8_t, uint32x4_t, vaddq_u32, vaddvq_u32, vaddw_high_u8, vaddw_u8, vdupq_n_u16, vdupq_n_u32, vget_low_u16,
+        vget_low_u8, vld1q_u16, vld1q_u8, vmlal_high_u16, vmlal_u16, vmull_u16, vpadalq_u16, vpaddlq_u8,
     };
 
     // A block of 16 bytes adds each byte to `a`, and to `b` that byte times
@@ -120,7 +119,14 @@ fn open(cell: u8) -> usize {
 /// Whether a crossing is nearby is random, so rather than branch on it, each
 /// candidate edge is always written and the end of the list only moves past
 /// it if it is kept.
-fn push_row_edges_scalar(above: &[u8], row: &[u8], first: usize, edges: &mut [u32], mut kept: usize, from: usize) -> usize {
+fn push_row_edges_scalar(
+    above: &[u8],
+    row: &[u8],
+    first: usize,
+    edges: &mut [u32],
+    mut kept: usize,
+    from: usize,
+) -> usize {
     for x in from..row.len() {
         let id = ((first + x) * 2) as u32;
         let here = open(row[x]);
@@ -162,12 +168,12 @@ const PACK: [[u8; 16]; 16] = {
 /// of the list moves once per four edges rather than once per edge.
 #[cfg(target_arch = "aarch64")]
 fn push_row_edges_neon(above: &[u8], row: &[u8], first: usize, edges: &mut [u32], mut kept: usize) -> usize {
-    use std::arch::aarch64::{
-        vaddq_u32, vandq_u8, vcombine_u8, vceq_u8, vdup_n_u8, vdupq_n_u32, vld1_u8, vld1q_u32, vld1q_u8, vmvn_u8,
-        vorr_u8, vpaddlq_u16, vpaddlq_u8, vqtbl1q_u8, vreinterpretq_u32_u8, vreinterpretq_u8_u32, vst1q_u32,
-        vzip1_u8, vzip2_u8, uint8x8_t,
-    };
     use crate::maze::{CROSS_EW, CROSS_NS};
+    use std::arch::aarch64::{
+        uint8x8_t, vaddq_u32, vandq_u8, vceq_u8, vcombine_u8, vdup_n_u8, vdupq_n_u32, vld1_u8, vld1q_u32, vld1q_u8,
+        vmvn_u8, vorr_u8, vpaddlq_u16, vpaddlq_u8, vqtbl1q_u8, vreinterpretq_u32_u8, vreinterpretq_u8_u32, vst1q_u32,
+        vzip1_u8, vzip2_u8,
+    };
 
     const LANE_BITS: [u8; 16] = [1, 2, 4, 8, 1, 2, 4, 8, 1, 2, 4, 8, 1, 2, 4, 8];
     const IOTA: [u32; 4] = [0, 1, 2, 3];
@@ -211,7 +217,10 @@ fn push_row_edges_neon(above: &[u8], row: &[u8], first: usize, edges: &mut [u32]
 
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
-unsafe fn vandq_u8_d(a: std::arch::aarch64::uint8x8_t, b: std::arch::aarch64::uint8x8_t) -> std::arch::aarch64::uint8x8_t {
+unsafe fn vandq_u8_d(
+    a: std::arch::aarch64::uint8x8_t,
+    b: std::arch::aarch64::uint8x8_t,
+) -> std::arch::aarch64::uint8x8_t {
     std::arch::aarch64::vand_u8(a, b)
 }
 
