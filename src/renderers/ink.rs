@@ -15,13 +15,13 @@
 use std::f64::consts::PI;
 use std::fmt::Write as _;
 
-use crate::maze::Grid;
+use crate::maze::{Grid, CROSS_EW, CROSS_NS};
 use crate::renderers::frame::{pdf_background, pdf_document, pdf_flip, pdf_frame, pdf_layout, svg_frame, svg_open};
-use crate::renderers::path::{flatten, parse_path, Chain, Point};
+use crate::renderers::path::{flatten, parse_path, Chain, Point, Segment};
 use crate::renderers::pdf::PdfOptions;
 use crate::renderers::style::{Colour, Pens, Style, CORRIDOR, RING};
 use crate::renderers::svg::{dots, is_dot, plain_tiles, svg_scale, Traces};
-use crate::renderers::{map_bands, push_fixed_trimmed, push_pair, used_tiles, PageSize, Solution};
+use crate::renderers::{map_bands, push_fixed_trimmed, push_pair, used_tiles, PageSize, Solution, TILE_KINDS};
 
 /// The ink and the pencil used for the solution.
 const INK: Colour = Colour([0x2b, 0x21, 0x18]);
@@ -32,6 +32,10 @@ const CHUNK: usize = 6;
 
 /// The pen widths, as fractions of the middle one.
 const WIDTHS: [f64; 3] = [0.8, 1.0, 1.22];
+
+/// How strongly the passage that goes under a crossing shows through the one
+/// on top, as in maze-hex.
+const FAINT_OPACITY: &str = "0.2";
 
 /// Different noise fields from the one seed.
 const SALT_X: u64 = 0x5851_F42D_4C95_7F2D;
@@ -281,11 +285,89 @@ fn walls(
     out
 }
 
+/// The walls of the passage that goes under a crossing of kind `cell`, in the
+/// tile's own coordinates: the stretch of each wall hidden inside the passage
+/// on top, from one of its walls to the other. `custom` is whether the style
+/// changes the corridor, which sets how wide the passages are.
+fn hidden_walls(cell: u8, s: f64, corridor: Option<f64>) -> Vec<Chain> {
+    // the passage's walls are at `a` and `b` across the cell, written exactly
+    // as the tiles' own walls are so the two ends meet
+    let (a, b) = match corridor {
+        Some(corridor) => (s / 2.0 - corridor * s / 2.0, s / 2.0 + corridor * s / 2.0),
+        None => (s * 0.2, s - s * 0.2),
+    };
+    // where the north-south passage is on top the east-west one runs under it
+    // along `y = a` and `y = b`; where it is the other way round, the walls
+    // are turned a quarter
+    let across = |at: f64| -> ((f64, f64), (f64, f64)) {
+        if cell == CROSS_NS {
+            ((a, at), (b, at))
+        } else {
+            ((at, a), (at, b))
+        }
+    };
+    [a, b]
+        .into_iter()
+        .map(|at| {
+            let (start, end) = across(at);
+            Chain { start, segments: vec![Segment::Line(end)] }.svg_rounded()
+        })
+        .collect()
+}
+
+/// The hidden walls of each kind of crossing the maze has, flattened, in the
+/// tile's own coordinates; empty for every other kind of tile.
+fn faint_tiles(s: f64, step: f64, corridor: Option<f64>, used: &[bool; TILE_KINDS]) -> Vec<Vec<Vec<Point>>> {
+    (0..TILE_KINDS as u8)
+        .map(|cell| {
+            if (cell == CROSS_NS || cell == CROSS_EW) && used[usize::from(cell)] {
+                flatten(&hidden_walls(cell, s, corridor), step)
+            } else {
+                Vec::new()
+            }
+        })
+        .collect()
+}
+
+/// The walls hidden under the crossings, wobbled with the same pen as the
+/// visible walls so they join up with them, as path data for each pen width.
+/// Empty when the maze has no crossings.
+fn faint_walls(grid: &Grid, s: f64, pen: &Pen, faint: &[Vec<Vec<Point>>]) -> [String; 3] {
+    let mut out: [String; 3] = Default::default();
+    let mut wobbled = Vec::new();
+    for j in 0..grid.height() {
+        for (i, &cell) in grid.row(j).iter().enumerate() {
+            let (x0, y0) = (i as f64 * s, j as f64 * s);
+            for line in &faint[usize::from(cell)] {
+                wobbled.clear();
+                wobbled.extend(line.iter().map(|&(x, y)| pen.wobble((x0 + x, y0 + y), 0)));
+                push_wall(&mut out, pen, &wobbled, Format::Svg);
+            }
+        }
+    }
+    out
+}
+
+/// Append a path for each pen width that has any walls, `base` being the
+/// width of the middle pen.
+fn push_wall_paths(out: &mut String, base: f64, paths: [String; 3]) {
+    for (factor, d) in WIDTHS.iter().zip(paths) {
+        if !d.is_empty() {
+            out.push_str(r#"<path stroke-width=""#);
+            push_fixed_trimmed(out, base * factor, 2);
+            w!(out, r#"" d="{d}"/>"#);
+        }
+    }
+}
+
 /// Everything an inked maze is drawn from, for cells of side `s`.
 struct Ink {
     pen: Pen,
     /// Each kind of tile's walls, flattened, in the tile's own coordinates.
     tiles: Vec<Vec<Vec<Point>>>,
+    /// The walls hidden under each kind of crossing, flattened, in the tile's
+    /// own coordinates.
+    faint: Vec<Vec<Vec<Point>>>,
     /// The solution, flattened, where it is on top and where it is under a
     /// crossing.
     over: Vec<Vec<Point>>,
@@ -321,6 +403,7 @@ impl Ink {
             cells.into_iter().flat_map(|(i, j)| ring_walls(grid[(i, j)], (i, j), s, hw, ring, pen.step)).collect()
         });
         Ink {
+            faint: faint_tiles(s, pen.step, style.custom_shape().then_some(style.corridor.unwrap_or(CORRIDOR)), &used),
             ring,
             rings,
             tiles: chains.iter().map(|chains| flatten(chains, pen.step)).collect(),
@@ -427,14 +510,21 @@ fn ink_svg_sized(
     svg_open(&mut out, w, h, s, style);
 
     w!(out, r#"<g fill="none" stroke="{ink_hex}" stroke-linecap="round" stroke-linejoin="round">"#);
-    for (factor, d) in WIDTHS.iter().zip(walls(grid, s, &ink.pen, &ink.tiles, &ink.rings, Format::Svg)) {
-        if !d.is_empty() {
-            out.push_str(r#"<path stroke-width=""#);
-            push_fixed_trimmed(&mut out, base * factor, 2);
-            w!(out, r#"" d="{d}"/>"#);
-        }
-    }
+    push_wall_paths(&mut out, base, walls(grid, s, &ink.pen, &ink.tiles, &ink.rings, Format::Svg));
     out.push_str("</g>");
+
+    // where a passage goes under another, its walls show faintly through the
+    // one on top. They are one group, so the opacity is applied once and where
+    // pieces of a wall overlap they don't darken.
+    let faint = faint_walls(grid, s, &ink.pen, &ink.faint);
+    if faint.iter().any(|d| !d.is_empty()) {
+        w!(
+            out,
+            r#"<g opacity="{FAINT_OPACITY}" fill="none" stroke="{ink_hex}" stroke-linecap="round" stroke-linejoin="round">"#
+        );
+        push_wall_paths(&mut out, base, faint);
+        out.push_str("</g>");
+    }
 
     // the start and end, inked in
     w!(out, r#"<path fill="{pencil}" fill-opacity="0.85" stroke="{ink_hex}" stroke-width=""#);
@@ -594,6 +684,48 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A 3 by 3 grid with straight passages through the middle, which is a
+    /// crossing of kind `middle`, or just a passage when it isn't one.
+    fn crossing_grid(middle: u8) -> Grid {
+        use crate::maze::{E, N, S, W};
+        let mut grid = Grid::new(3, 3);
+        grid[(1, 0)] = S;
+        grid[(1, 2)] = N;
+        grid[(0, 1)] = E;
+        grid[(2, 1)] = W;
+        grid[(1, 1)] = middle;
+        grid
+    }
+
+    #[test]
+    fn the_passage_under_a_crossing_shows_faintly() {
+        for middle in [CROSS_NS, CROSS_EW] {
+            let svg = ink_svg_cells(&crossing_grid(middle), 40.0, true, None, 7, &Style::default());
+            assert_eq!(svg.matches(r#"<g opacity="0.2""#).count(), 1, "one faint group for crossing {middle}");
+            assert!(!svg.contains("NaN"));
+        }
+    }
+
+    #[test]
+    fn nothing_is_faint_without_a_crossing() {
+        use crate::maze::{E, W};
+        let svg = ink_svg_cells(&crossing_grid(E | W), 40.0, true, None, 7, &Style::default());
+        assert!(!svg.contains("opacity=\"0.2\""));
+    }
+
+    #[test]
+    fn the_hidden_walls_run_between_the_walls_on_top() {
+        // north-south on top: the east-west walls cross from x = 8 to x = 32
+        let chains = hidden_walls(CROSS_NS, 40.0, None);
+        let lines = flatten(&chains, 4.0);
+        assert_eq!(lines.len(), 2);
+        assert_eq!((lines[0][0], *lines[0].last().unwrap()), ((8.0, 8.0), (32.0, 8.0)));
+        assert_eq!((lines[1][0], *lines[1].last().unwrap()), ((8.0, 32.0), (32.0, 32.0)));
+        // east-west on top: the same, turned a quarter
+        let lines = flatten(&hidden_walls(CROSS_EW, 40.0, None), 4.0);
+        assert_eq!((lines[0][0], *lines[0].last().unwrap()), ((8.0, 8.0), (8.0, 32.0)));
     }
 
     #[test]
