@@ -695,6 +695,9 @@ mod tests {
         grid[(1, 2)] = N;
         grid[(0, 1)] = E;
         grid[(2, 1)] = W;
+        // the other corners are dead ends, as every cell of a tile needs a kind
+        grid[(2, 0)] = S;
+        grid[(0, 2)] = N;
         grid[(1, 1)] = middle;
         grid
     }
