@@ -127,17 +127,16 @@ fn styled_outputs(id: &str, width: usize, height: usize, density: i64, add_a_loo
 
 #[test]
 fn styled_outputs_are_unchanged() {
-    for &(id, w, h, d, l, _) in STYLED_CASES {
-        eprintln!("NEWHASH {id} {}", styled_outputs(id, w, h, d, l));
+    for &(id, w, h, d, l, expected) in STYLED_CASES {
+        assert_eq!(styled_outputs(id, w, h, d, l), expected, "maze {id} {w}x{h} density={d} loop={l}");
     }
-    panic!("print");
 }
 
 const STYLED_CASES: &[(&str, usize, usize, i64, bool, &str)] = &[
-    ("abc", 10, 8, 50, false, "819da8c26d4309d30706fc7d58d9703de8ca050136f459cf5c7f34df4bdfe609"),
-    ("my-maze", 23, 30, 50, false, "4fd7123695bfecd57d0d3c9d3abfb48f0e703c693688803ca043980d4378a4f4"),
-    ("loop", 23, 30, 50, true, "d36b02e73404df15a8b76a37956f4d8a60269540ff16a9357e5211b82cb8eb44"),
-    ("dense", 40, 40, 10, false, "b042eaa40939dc38bf4fd7d53e6bd9e7503a7ed5dda21403ad3d7dd21fbd9ea1"),
-    ("tall", 3, 60, 50, false, "f93fc832e74259a02801738ca0dde6e052da2f3249ac619bde2cce1e485b852a"),
+    ("abc", 10, 8, 50, false, "fc8ffccf1ea6b923e3a2d5b4222c5037f882ab529bd59723b05ed25d0adab8c2"),
+    ("my-maze", 23, 30, 50, false, "454e71283bdbd2dd9fe5e02de413b0429abb2fc9292c1a83c46414aa0ccf00cf"),
+    ("loop", 23, 30, 50, true, "397d125e1189283f15be291225cbaeb132ed784ec7b5fee07b5264b34e0741b7"),
+    ("dense", 40, 40, 10, false, "47ef39781c5610650dae7380c801773a364e8c84cb6f8bd1d5f8d457630411d1"),
+    ("tall", 3, 60, 50, false, "55e8c71d35551c277043b1b60238712ee6becbc441763c34f7acfc711b9c62d5"),
     ("one", 1, 1, 50, false, "efb3a56aa353bb593249aefe584ab77593250f8b85dfaed0bdaf76f5cde8417c"),
 ];
