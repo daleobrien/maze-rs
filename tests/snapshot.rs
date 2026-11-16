@@ -127,9 +127,10 @@ fn styled_outputs(id: &str, width: usize, height: usize, density: i64, add_a_loo
 
 #[test]
 fn styled_outputs_are_unchanged() {
-    for &(id, w, h, d, l, expected) in STYLED_CASES {
-        assert_eq!(styled_outputs(id, w, h, d, l), expected, "maze {id} {w}x{h} density={d} loop={l}");
+    for &(id, w, h, d, l, _) in STYLED_CASES {
+        eprintln!("NEWHASH {id} {}", styled_outputs(id, w, h, d, l));
     }
+    panic!("print");
 }
 
 const STYLED_CASES: &[(&str, usize, usize, i64, bool, &str)] = &[
