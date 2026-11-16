@@ -11,6 +11,11 @@ the corridor opens into a ring with a red dot inside. `--ring` sets the ring's
 radius, as a fraction of a cell (0.46 normally, up to 0.48); 0 draws a plain dot
 instead.
 
+Where a passage goes under another, its walls show faintly (at 20% opacity)
+through the passage on top, drawn with the same pen so they join the visible
+walls on either side. Mazes without crossings are drawn as before. This is in
+the SVG only, not the PDF, which has no transparency.
+
 With `-s`, the solution is pencilled over the ink.
 
 <p align="center">

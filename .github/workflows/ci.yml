@@ -1,0 +1,41 @@
+# Checks every push and pull request the way `make lint` and `make test` do,
+# then draws a few sample mazes with the CLI and keeps them as an artifact so
+# a change to the drawing can be looked at without building anything.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --release
+
+      # Fixed ids make the same mazes every run. Ink with the solution and
+      # without it, and the plain drawing, all 20 by 20.
+      - name: Draw samples
+        run: |
+          mkdir samples
+          cargo run --release --quiet -- svg samples/ink.svg -s samples/ink-solved.svg -W 20 -H 20 -i faint -I
+          cargo run --release --quiet -- svg samples/plain.svg -s samples/plain-solved.svg -W 20 -H 20 -i faint
+      - uses: actions/upload-artifact@v4
+        with:
+          name: samples
+          path: samples
